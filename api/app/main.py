@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.auth.clientip import TrustedProxies
 from app.auth.ratelimit import LoginRateLimiter
 from app.auth.router import router as auth_router
 from app.config import AppEnv, get_settings
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.object_store = ObjectStore(settings)
     # In memory: correct for one API process. See app/auth/ratelimit.py.
     app.state.login_limiter = LoginRateLimiter()
+    app.state.trusted_proxies = TrustedProxies.parse(settings.trusted_proxies)
     try:
         yield
     finally:

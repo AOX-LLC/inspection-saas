@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     session_absolute_seconds: int = 7 * 24 * 60 * 60
     # None means Secure outside demo and test, where plain HTTP on localhost is normal.
     cookie_secure: bool | None = None
+    # Proxies whose X-Forwarded-For is believed: IP addresses, CIDR ranges or host names,
+    # comma-separated. Empty trusts none, and every request is rate-limited by its socket
+    # address. In Compose this is the web service, which forwards its clients' addresses.
+    trusted_proxies: str = ""
     # Browser origins allowed to make state-changing requests. Comma-separated.
     allowed_origins: str = "http://127.0.0.1:4700,http://localhost:4700"
 

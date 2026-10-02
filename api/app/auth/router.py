@@ -9,11 +9,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth import store
+from app.auth.clientip import client_ip
 from app.auth.deps import SESSION_COOKIE, PrincipalDep
 from app.auth.passwords import LoginBusyError, verify_password
 from app.config import get_settings
 from app.db.tenant import user_transaction
-from app.deps import EngineDep, LoginLimiterDep, SessionFactoryDep
+from app.deps import EngineDep, LoginLimiterDep, SessionFactoryDep, TrustedProxiesDep
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -65,10 +66,6 @@ async def _load_me(factory: async_sessionmaker[AsyncSession], user_id: UUID) -> 
     )
 
 
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
 @router.post("/login")
 async def login(
     body: LoginRequest,
@@ -77,8 +74,9 @@ async def login(
     engine: EngineDep,
     factory: SessionFactoryDep,
     limiter: LoginLimiterDep,
+    proxies: TrustedProxiesDep,
 ) -> Me:
-    ip = _client_ip(request)
+    ip = await client_ip(request, proxies)
     email = body.email.strip().lower()
 
     wait = limiter.retry_after(ip, email)
