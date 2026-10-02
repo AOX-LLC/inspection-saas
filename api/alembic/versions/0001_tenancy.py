@@ -161,6 +161,7 @@ CREATE TABLE files (
         REFERENCES projects (org_id, id) ON DELETE CASCADE
 );
 CREATE INDEX files_org_id_project_id_idx ON files (org_id, project_id);
+CREATE INDEX files_uploaded_by_idx ON files (uploaded_by);
 
 -- Append-only: the app may insert and read, never change or remove.
 CREATE TABLE audit_events (
@@ -174,6 +175,7 @@ CREATE TABLE audit_events (
     occurred_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX audit_events_org_id_occurred_at_idx ON audit_events (org_id, occurred_at DESC);
+CREATE INDEX audit_events_actor_user_id_idx ON audit_events (actor_user_id);
 
 REVOKE ALL ON sessions FROM {APP_ROLE};
 REVOKE UPDATE, DELETE ON audit_events FROM {APP_ROLE};
