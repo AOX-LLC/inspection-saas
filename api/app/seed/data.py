@@ -5,7 +5,7 @@ references. All names and emails are synthetic.
 """
 
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid5
 
 ALPHA = UUID("8e35f604-8a87-4fba-b70e-e87a8e22efd1")
 BETA = UUID("d16b9455-89e1-4a14-8535-6f581ac38d7b")
@@ -74,3 +74,29 @@ PROJECTS = (
     ),
     SeedProject(UUID("648e0f72-478a-40ef-aeef-3112555e4643"), BETA, "Synthetic Water Tank Roof"),
 )
+
+# The one password every demo user has. It is published in the README and
+# protects nothing: the seed only runs with APP_ENV=demo, on synthetic data.
+DEMO_PASSWORD = "synthetic-demo-password"  # noqa: S105 (published demo credential)
+
+FILES_PER_PROJECT = 2
+
+
+@dataclass(frozen=True)
+class SeedFile:
+    id: UUID
+    org_id: UUID
+    project_id: UUID
+    index: int
+
+
+def _seed_files() -> tuple[SeedFile, ...]:
+    # uuid5 keeps the ids stable between runs without listing them by hand.
+    return tuple(
+        SeedFile(uuid5(project.id, f"file-{index}"), project.org_id, project.id, index)
+        for project in PROJECTS
+        for index in range(1, FILES_PER_PROJECT + 1)
+    )
+
+
+FILES = _seed_files()
