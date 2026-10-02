@@ -387,3 +387,66 @@ def test_a_grey_and_alpha_image_is_flattened_onto_white():
     assert image.mode == "RGB"
     assert image.getpixel((2, 5)) == (50, 50, 50)
     assert image.getpixel((15, 5)) == (255, 255, 255)
+
+
+# Thumbnails --------------------------------------------------------------------
+
+
+def thumbnails_of(stored: bytes, *, size: int = 320) -> list[bytes]:
+    produced: list[bytes] = []
+    tile_image(
+        stored,
+        tile_size=TILE,
+        overlap=OVERLAP,
+        quality=85,
+        max_pixels=10**7,
+        max_tiles=512,
+        store=lambda spec, jpeg: None,
+        thumbnail_size=size,
+        store_thumbnail=produced.append,
+    )
+    return produced
+
+
+def test_one_thumbnail_is_made_from_the_oriented_photo():
+    stored = with_orientation(marked(1200, 700), 6, quality=95)  # shown as 700 x 1200
+
+    (jpeg,) = thumbnails_of(stored)
+
+    image = decode(jpeg)
+    assert image.size == (round(320 * 700 / 1200), 320)
+    # The marker is at (640, 50) of the oriented photo, so at (640, 50) * scale here.
+    scale = 320 / 1200
+    assert is_red(image.getpixel((round(640 * scale), round(50 * scale))))
+
+
+def test_a_thumbnail_carries_no_metadata_from_the_original():
+    exif = Image.Exif()
+    exif[0x010F] = "Synthetic Camera Maker"
+    stored = encode(marked(900, 700), "JPEG", exif=exif, comment=b"inspector: J. Citizen")
+
+    (jpeg,) = thumbnails_of(stored)
+
+    assert dict(decode(jpeg).getexif()) == {}
+    assert b"Synthetic Camera Maker" not in jpeg and b"J. Citizen" not in jpeg
+
+
+def test_no_thumbnail_is_made_unless_asked_for():
+    produced: list[bytes] = []
+    tile_image(
+        encode(marked(900, 700), "JPEG"),
+        tile_size=TILE,
+        overlap=OVERLAP,
+        quality=85,
+        max_pixels=10**7,
+        max_tiles=512,
+        store=lambda spec, jpeg: None,
+        store_thumbnail=produced.append,
+    )
+
+    assert produced == []
+
+
+def test_a_thumbnail_is_not_stored_for_a_photo_that_is_refused():
+    with pytest.raises(ImageRejected):
+        thumbnails_of(header_only_png(60_000, 60_000))

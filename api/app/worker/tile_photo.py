@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db.tenant import tenant_transaction
-from app.storage.keys import assert_key_in_org, tile_key
+from app.storage.keys import assert_key_in_org, thumbnail_key, tile_key
 from app.storage.s3 import ObjectStore
 from app.tiling import ImageRejected, TileSpec, tile_image
 from app.worker.errors import JobError
@@ -54,8 +54,9 @@ _INSERT_TILE = text(
     """
 )
 _TILED = text(
-    "UPDATE photos SET status = 'tiled', width = :width, height = :height, error = NULL, "
-    "updated_at = now() WHERE id = :photo_id AND org_id = :org_id"
+    "UPDATE photos SET status = 'tiled', width = :width, height = :height, "
+    "thumb_key = :thumb_key, error = NULL, updated_at = now() "
+    "WHERE id = :photo_id AND org_id = :org_id"
 )
 _FAILED = text(
     "UPDATE photos SET status = 'failed', error = :error, updated_at = now() "
@@ -143,6 +144,10 @@ class TilePhoto:
             key = tile_key(job.org_id, source.project_id, photo_id, spec.level, spec.x, spec.y)
             self._store.put(key, jpeg, "image/jpeg")
 
+        def store_thumbnail(jpeg: bytes) -> None:
+            key = thumbnail_key(job.org_id, source.project_id, photo_id)
+            self._store.put(key, jpeg, "image/jpeg")
+
         def work() -> tuple[int, int, list[TileSpec]]:
             return tile_image(
                 data,
@@ -152,6 +157,8 @@ class TilePhoto:
                 max_pixels=settings.max_image_pixels,
                 max_tiles=settings.max_tiles_per_photo,
                 store=store_tile,
+                thumbnail_size=settings.thumbnail_size,
+                store_thumbnail=store_thumbnail,
             )
 
         await self._decode_slots.acquire()
@@ -196,7 +203,15 @@ class TilePhoto:
         async with tenant_transaction(self._factory, org_id=job.org_id, user_id=None) as session:
             await session.execute(_CLEAR_TILES, params)
             await session.execute(_INSERT_TILE, rows)
-            await session.execute(_TILED, {**params, "width": width, "height": height})
+            await session.execute(
+                _TILED,
+                {
+                    **params,
+                    "width": width,
+                    "height": height,
+                    "thumb_key": thumbnail_key(job.org_id, source.project_id, photo_id),
+                },
+            )
 
 
 def _photo_id(job: ClaimedJob) -> UUID:

@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     s3_access_key_id_file: Path = Path("/run/inspection-secrets/storage/s3_access_key_id")
     s3_secret_access_key_file: Path = Path("/run/inspection-secrets/storage/s3_secret_access_key")
     presign_ttl_seconds: int = 300
+    # Thumbnails are many and small, and a grid stays open, so they live longer than an upload.
+    thumbnail_ttl_seconds: int = Field(default=900, ge=60, le=900)
     max_upload_bytes: int = 50 * 1024 * 1024
 
     # Tiling. A tile is cut at the detector's input size, so a tile of
@@ -69,6 +71,8 @@ class Settings(BaseSettings):
     tile_size: int = Field(default=640, ge=64, le=4096)
     tile_overlap: int = Field(default=128, ge=0)
     tile_jpeg_quality: int = Field(default=85, ge=1, le=100)
+    # The longest side of the one small preview the grid shows, so it never loads a photo.
+    thumbnail_size: int = Field(default=320, ge=32, le=1024)
     # The largest decoded image the worker will open, in pixels, and the most
     # tiles it will cut from one photo. Together they bound memory and time for
     # a hostile or pathological file.
