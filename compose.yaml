@@ -12,8 +12,10 @@ x-api-build: &api-build
 
 x-api-image: &api-image inspection-saas-api:local
 
+# Memory limits keep the stack a polite neighbour on a small shared host.
 services:
   secrets:
+    mem_limit: 64m
     image: pgvector/pgvector:0.8.7-pg18-trixie@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
     user: "0:0"
     entrypoint: ["/bin/sh", "/generate.sh"]
@@ -26,6 +28,7 @@ services:
       - ./infra/secrets/generate.sh:/generate.sh:ro
 
   db:
+    mem_limit: 512m
     image: pgvector/pgvector:0.8.7-pg18-trixie@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
     environment:
       POSTGRES_PASSWORD_FILE: /run/inspection-secrets/db/postgres_password
@@ -50,6 +53,7 @@ services:
       start_period: 10s
 
   migrate:
+    mem_limit: 256m
     <<: *hardening
     build: *api-build
     image: *api-image
@@ -64,6 +68,7 @@ services:
         condition: service_healthy
 
   seed:
+    mem_limit: 256m
     <<: *hardening
     build: *api-build
     image: *api-image
@@ -78,6 +83,7 @@ services:
         condition: service_completed_successfully
 
   api:
+    mem_limit: 256m
     <<: *hardening
     build: *api-build
     image: *api-image
@@ -101,6 +107,7 @@ services:
       start_period: 5s
 
   test:
+    mem_limit: 512m
     <<: *hardening
     profiles: [test]
     build:
