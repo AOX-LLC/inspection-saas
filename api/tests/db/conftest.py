@@ -12,9 +12,9 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from alembic import command
 from alembic.config import Config
 
-from alembic import command
 from app.config import get_settings
 
 TEST_DATABASE = "inspection_test"

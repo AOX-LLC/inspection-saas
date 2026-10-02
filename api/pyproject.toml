@@ -31,6 +31,10 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "SIM", "RUF"]
 
+[tool.ruff.lint.isort]
+# The local alembic/ directory holds migrations, not the package.
+known-third-party = ["alembic"]
+
 [tool.ruff.lint.per-file-ignores]
 # Migrations and tests interpolate only module constants into SQL.
 "alembic/versions/**" = ["S608"]

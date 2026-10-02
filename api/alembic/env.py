@@ -2,10 +2,10 @@
 
 import asyncio
 
+from alembic import context
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from alembic import context
 from app.config import get_settings
 
 # Kept out of `public` so the app role, which has rights in `public`, never sees it.
