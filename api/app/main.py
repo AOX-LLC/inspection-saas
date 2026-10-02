@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.auth.clientip import TrustedProxies
+from app.auth.demo import router as demo_router
 from app.auth.ratelimit import LoginRateLimiter
 from app.auth.router import router as auth_router
 from app.config import AppEnv, get_settings
@@ -53,6 +54,9 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_error)
     app.add_api_route("/health", health, methods=["GET"], include_in_schema=False)
     app.include_router(auth_router)
+    if get_settings().app_env is AppEnv.DEMO:
+        # Not registered in any other mode, so it answers 404 there like any unknown path.
+        app.include_router(demo_router)
     app.include_router(projects_router)
     app.include_router(files_router)
     app.include_router(photos_router)
