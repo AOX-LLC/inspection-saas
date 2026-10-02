@@ -28,6 +28,7 @@ DEFINER_EXECUTE_GRANTEES = {
     "auth.create_session(uuid,bytea,integer)": {APP_ROLE},
     "auth.resolve_session(bytea,integer)": {APP_ROLE},
     "auth.revoke_session(bytea)": {APP_ROLE},
+    "auth.purge_sessions(integer,integer)": {WORKER_ROLE},
     "queue.jobs_claim(text,text[],integer)": {WORKER_ROLE},
     "queue.jobs_complete(uuid,text)": {WORKER_ROLE},
     "queue.jobs_fail(uuid,text,text,boolean,integer)": {WORKER_ROLE},
@@ -468,7 +469,8 @@ def test_auth_role_holds_only_the_grants_it_needs(app_conn):
     assert granted == {
         "users": {"SELECT"},
         "credentials": {"SELECT", "INSERT", "UPDATE"},
-        "sessions": {"SELECT", "INSERT", "UPDATE"},
+        # DELETE is for auth.purge_sessions, which the worker's cleanup calls.
+        "sessions": {"SELECT", "INSERT", "UPDATE", "DELETE"},
     }
 
 
@@ -683,6 +685,7 @@ def test_definer_functions_exist(app_conn):
         "auth.create_session(uuid,bytea,integer)",
         "auth.resolve_session(bytea,integer)",
         "auth.revoke_session(bytea)",
+        "auth.purge_sessions(integer,integer)",
         "queue.jobs_claim(text,text[],integer)",
         "queue.jobs_complete(uuid,text)",
         "queue.jobs_fail(uuid,text,text,boolean,integer)",
