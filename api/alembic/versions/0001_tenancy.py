@@ -178,6 +178,8 @@ CREATE INDEX audit_events_org_id_occurred_at_idx ON audit_events (org_id, occurr
 CREATE INDEX audit_events_actor_user_id_idx ON audit_events (actor_user_id);
 
 REVOKE ALL ON sessions FROM {APP_ROLE};
+-- Removing an org or a user is an erasure path for the owner, not a request.
+REVOKE DELETE ON orgs, users FROM {APP_ROLE};
 REVOKE UPDATE, DELETE ON audit_events FROM {APP_ROLE};
 
 -- Row-level security -------------------------------------------------------

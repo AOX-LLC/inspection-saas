@@ -21,8 +21,8 @@ DML = {"SELECT", "INSERT", "UPDATE", "DELETE"}
 # Exactly what the app role may do to each table. A new table fails here until
 # someone decides its grants on purpose.
 EXPECTED_APP_PRIVILEGES = {
-    "orgs": DML,
-    "users": DML,
+    "orgs": DML - {"DELETE"},
+    "users": DML - {"DELETE"},
     "memberships": DML,
     "projects": DML,
     "files": DML,
