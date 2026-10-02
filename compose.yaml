@@ -1,0 +1,130 @@
+name: inspection-saas
+
+x-hardening: &hardening
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+x-api-build: &api-build
+  context: ./api
+  target: runtime
+
+x-api-image: &api-image inspection-saas-api:local
+
+# Memory limits keep the stack a polite neighbour on a small shared host.
+services:
+  secrets:
+    mem_limit: 64m
+    image: pgvector/pgvector:0.8.7-pg18-trixie@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/generate.sh"]
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - secrets:/secrets
+      - ./infra/secrets/generate.sh:/generate.sh:ro
+
+  db:
+    mem_limit: 512m
+    image: pgvector/pgvector:0.8.7-pg18-trixie@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/inspection-secrets/db/postgres_password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=peer"
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - secrets:/run/inspection-secrets:ro
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:4702:5432"
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+    healthcheck:
+      # TCP on purpose: the init-time temporary server listens only on the
+      # socket, so this stays unhealthy until the init scripts have finished.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres", "-d", "inspection"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  migrate:
+    mem_limit: 256m
+    <<: *hardening
+    build: *api-build
+    image: *api-image
+    user: "10002:10002"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      APP_ENV: demo
+    volumes:
+      - secrets:/run/inspection-secrets:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  seed:
+    mem_limit: 256m
+    <<: *hardening
+    build: *api-build
+    image: *api-image
+    user: "10002:10002"
+    command: ["python", "-m", "app.seed"]
+    environment:
+      APP_ENV: demo
+    volumes:
+      - secrets:/run/inspection-secrets:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    mem_limit: 256m
+    <<: *hardening
+    build: *api-build
+    image: *api-image
+    environment:
+      APP_ENV: demo
+      MODEL_MODE: ${MODEL_MODE:-mock}
+    volumes:
+      - secrets:/run/inspection-secrets:ro
+    ports:
+      - "127.0.0.1:4701:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  test:
+    mem_limit: 512m
+    <<: *hardening
+    profiles: [test]
+    build:
+      context: ./api
+      target: test
+    image: inspection-saas-api:test
+    user: "10003:10003"
+    group_add: ["10001", "10002"]
+    environment:
+      APP_ENV: test
+      DB_NAME: inspection_test
+    volumes:
+      - secrets:/run/inspection-secrets:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  secrets:
