@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.22"
+          enable-cache: true
+          cache-dependency-glob: api/uv.lock
+
+      - name: Install dependencies
+        working-directory: api
+        run: uv sync --frozen
+
+      - name: Lint
+        working-directory: api
+        run: uv run ruff check .
+
+      - name: Check formatting
+        working-directory: api
+        run: uv run ruff format --check .
+
+      - name: Build images
+        run: |
+          docker compose build
+          docker compose --profile test build test
+
+      - name: Start the stack
+        run: docker compose up -d --wait
+
+      - name: Health check
+        run: curl --fail --silent --show-error http://127.0.0.1:4701/health
+
+      - name: Run the test suite
+        run: docker compose --profile test run --rm test
+
+      - name: Show service logs
+        if: failure()
+        run: docker compose --profile test logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile test down -v
+
+  secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan history for secrets
+        run: >-
+          docker run --rm --user "$(id -u):$(id -g)"
+          -v "$PWD:/repo" -w /repo
+          zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git --redact --verbose --no-banner /repo
