@@ -11,6 +11,8 @@ import pytest
 APP_ROLE = "inspection_app"
 OWNER_ROLE = "inspection_owner"
 AUTH_ROLE = "inspection_auth"
+WORKER_ROLE = "inspection_worker"
+DISPATCHER_ROLE = "inspection_dispatcher"
 
 # Who may own SECURITY DEFINER functions, by schema. They run with the owner's
 # rights, so the owner is a decision, not a default: a new definer function
@@ -342,7 +344,7 @@ def app_column_grants(connection: psycopg.Connection) -> set[str]:
     return {row[0] for row in rows}
 
 
-@pytest.mark.parametrize("role", [APP_ROLE, OWNER_ROLE])
+@pytest.mark.parametrize("role", [APP_ROLE, OWNER_ROLE, WORKER_ROLE])
 def test_role_has_no_elevated_attributes(app_conn, role):
     row = app_conn.execute(
         """
@@ -372,8 +374,8 @@ def test_app_role_inherits_no_other_role(app_conn):
     assert count == 0
 
 
-def test_owner_may_set_role_to_auth_but_does_not_inherit_it(app_conn):
-    """The owner's only membership is the auth role, usable by SET ROLE and not inherited."""
+def test_owner_may_set_role_to_the_definer_roles_but_does_not_inherit_them(app_conn):
+    """The owner's only memberships are the two NOLOGIN definer roles: SET ROLE, no inherit."""
     memberships = app_conn.execute(
         """
         SELECT roleid::regrole::text, inherit_option, set_option, admin_option
@@ -381,7 +383,10 @@ def test_owner_may_set_role_to_auth_but_does_not_inherit_it(app_conn):
         """,
         (OWNER_ROLE,),
     ).fetchall()
-    assert memberships == [(AUTH_ROLE, False, True, False)]
+    assert sorted(memberships) == [
+        (AUTH_ROLE, False, True, False),
+        (DISPATCHER_ROLE, False, True, False),
+    ]
 
 
 def test_nobody_else_is_a_member_of_the_auth_role(app_conn):

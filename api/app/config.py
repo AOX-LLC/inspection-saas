@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     db_app_user: str = "inspection_app"
     db_app_password_file: Path = Path("/run/inspection-secrets/app/app_password")
 
+    db_worker_user: str = "inspection_worker"
+    db_worker_password_file: Path = Path("/run/inspection-secrets/worker/worker_password")
+
     db_owner_user: str = "inspection_owner"
     db_owner_password_file: Path = Path("/run/inspection-secrets/owner/owner_password")
 
@@ -71,6 +74,9 @@ class Settings(BaseSettings):
 
     def app_database_url(self) -> URL:
         return self._database_url(self.db_app_user, self.db_app_password_file)
+
+    def worker_database_url(self) -> URL:
+        return self._database_url(self.db_worker_user, self.db_worker_password_file)
 
     def owner_database_url(self) -> URL:
         return self._database_url(self.db_owner_user, self.db_owner_password_file)

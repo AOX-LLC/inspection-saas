@@ -76,6 +76,11 @@ def app_conninfo() -> str:
     return _conninfo(settings.db_app_user, settings.db_app_password_file)
 
 
+def worker_conninfo() -> str:
+    settings = get_settings()
+    return _conninfo(settings.db_worker_user, settings.db_worker_password_file)
+
+
 def owner_conninfo() -> str:
     settings = get_settings()
     return _conninfo(settings.db_owner_user, settings.db_owner_password_file)
@@ -158,6 +163,12 @@ def _rolled_back_connection(conninfo: str) -> Iterator[psycopg.Connection]:
 def app_conn() -> Iterator[psycopg.Connection]:
     """The app role, inside one transaction that is rolled back afterwards."""
     yield from _rolled_back_connection(app_conninfo())
+
+
+@pytest.fixture
+def worker_conn() -> Iterator[psycopg.Connection]:
+    """The worker role, inside one transaction that is rolled back afterwards."""
+    yield from _rolled_back_connection(worker_conninfo())
 
 
 @pytest.fixture
