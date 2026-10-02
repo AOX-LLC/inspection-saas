@@ -30,7 +30,7 @@ async def test_login_sets_a_hardened_cookie_and_returns_the_user(anonymous, worl
     assert "max-age=604800" in cookie
 
 
-async def test_cookie_is_marked_secure_in_production(world: World, monkeypatch):
+async def test_cookie_secure_flag_can_be_forced_on(world: World, monkeypatch):
     from app.config import get_settings
     from app.main import create_app
 
@@ -46,6 +46,14 @@ async def test_cookie_is_marked_secure_in_production(world: World, monkeypatch):
     finally:
         monkeypatch.delenv("COOKIE_SECURE")
         get_settings.cache_clear()
+
+
+async def test_cookies_are_secure_by_default_only_in_production():
+    from app.config import AppEnv, Settings
+
+    assert Settings(app_env=AppEnv.PRODUCTION).cookie_is_secure is True
+    assert Settings(app_env=AppEnv.DEMO).cookie_is_secure is False
+    assert Settings(app_env=AppEnv.PRODUCTION, cookie_secure=False).cookie_is_secure is False
 
 
 async def test_responses_carry_security_headers(anonymous):
@@ -223,6 +231,39 @@ async def test_health_stays_status_only(anonymous):
     assert response.json() == {"status": "ok"}
 
 
+async def test_logging_in_again_revokes_the_session_in_the_cookie(signed_in, app, world: World):
+    client = await signed_in(world.alpha.owner)
+    old_token = client.cookies["session"]
+
+    await login(client, world.alpha.owner)
+
+    assert client.cookies["session"] != old_token
+    async with new_client(app) as replay:
+        replay.cookies.set("session", old_token)
+        assert (await replay.get("/auth/me")).status_code == 401
+
+
+async def test_validation_errors_do_not_echo_the_password(anonymous, world: World):
+    secret = "p" * 2000
+    response = await anonymous.post(
+        "/auth/login", json={"email": world.alpha.owner.email, "password": secret}
+    )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+
+
+async def test_logins_are_turned_away_when_too_many_are_waiting(
+    anonymous, world: World, monkeypatch
+):
+    monkeypatch.setattr(passwords, "MAX_WAITING_LOGINS", 0)
+    response = await anonymous.post(
+        "/auth/login", json={"email": world.alpha.owner.email, "password": PASSWORD}
+    )
+    assert response.status_code == 503
+    assert response.headers["retry-after"]
+
+
 # Rate limiting ------------------------------------------------------------------
 
 
@@ -260,6 +301,35 @@ async def test_failed_logins_from_one_ip_are_throttled(app, world: World):
             "/auth/login", json={"email": world.alpha.owner.email, "password": PASSWORD}
         )
     assert blocked.status_code == 429
+
+
+async def test_concurrent_guesses_cannot_outrun_the_limit(app, world: World, monkeypatch):
+    import asyncio
+
+    reached_verify = 0
+    real_verify = passwords._verify
+
+    def counting(stored_hash: str, password: str) -> bool:
+        nonlocal reached_verify
+        reached_verify += 1
+        return real_verify(stored_hash, password)
+
+    monkeypatch.setattr(passwords, "_verify", counting)
+    app.state.login_limiter = LoginRateLimiter(per_ip_limit=1000, per_email_limit=3)
+    async with new_client(app) as client:
+        responses = await asyncio.gather(
+            *(
+                client.post(
+                    "/auth/login", json={"email": world.alpha.owner.email, "password": "wrong"}
+                )
+                for _ in range(15)
+            )
+        )
+
+    statuses = [r.status_code for r in responses]
+    assert statuses.count(401) == 3
+    assert statuses.count(429) == 12
+    assert reached_verify == 3
 
 
 async def test_unknown_emails_are_throttled_like_real_ones(app):

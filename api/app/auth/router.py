@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth import store
 from app.auth.deps import SESSION_COOKIE, PrincipalDep
-from app.auth.passwords import verify_password
+from app.auth.passwords import LoginBusyError, verify_password
 from app.config import get_settings
 from app.db.tenant import user_transaction
 from app.deps import EngineDep, LoginLimiterDep, SessionFactoryDep
@@ -89,15 +89,29 @@ async def login(
             headers={"Retry-After": str(wait)},
         )
 
+    # Counted before any slow work, so concurrent guesses cannot all slip past
+    # the check above. A success clears the email's count below.
+    limiter.record_failure(ip, email)
+
     record = await store.find_login(engine, email)
-    # Runs a full verification even when there is no such account.
-    verified = await verify_password(record.password_hash if record else None, body.password)
+    try:
+        # Runs a full verification even when there is no such account.
+        verified = await verify_password(record.password_hash if record else None, body.password)
+    except LoginBusyError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Busy. Try again shortly.",
+            headers={"Retry-After": "5"},
+        ) from None
     if record is None or not verified:
-        limiter.record_failure(ip, email)
         logger.warning("login failed", extra={"client_ip": ip})
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=INVALID_LOGIN)
 
     settings = get_settings()
+    # A new login replaces the session the cookie still holds.
+    previous = request.cookies.get(SESSION_COOKIE)
+    if previous:
+        await store.revoke_session(engine, previous)
     token = store.new_token()
     await store.create_session(engine, record.user_id, token, settings.session_absolute_seconds)
     limiter.record_success(email)

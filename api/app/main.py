@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -46,11 +47,18 @@ def create_app() -> FastAPI:
         openapi_url=None if is_production else "/openapi.json",
     )
     app.middleware("http")(protect)
+    app.add_exception_handler(RequestValidationError, validation_error)
     app.add_api_route("/health", health, methods=["GET"], include_in_schema=False)
     app.include_router(auth_router)
     app.include_router(projects_router)
     app.include_router(files_router)
     return app
+
+
+async def validation_error(request: Request, error: RequestValidationError) -> JSONResponse:
+    """422 without the offending input, which can be a password."""
+    detail = [{"loc": e["loc"], "msg": e["msg"], "type": e["type"]} for e in error.errors()]
+    return JSONResponse({"detail": detail}, status_code=422)
 
 
 async def health(request: Request) -> JSONResponse:

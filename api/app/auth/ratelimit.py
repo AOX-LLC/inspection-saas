@@ -2,8 +2,8 @@
 
 State lives in this process, which is correct while one API process serves
 traffic. With several processes each would count separately, so move the
-counters to a shared store before scaling out. Failures are counted per
-window; the per-email counter clears on a successful login.
+counters to a shared store before scaling out. Attempts are counted per
+window, before they are verified; the per-email counter clears on a successful login.
 
 Both limits count unknown emails too, so a lockout never reveals whether an
 account exists. A per-email limit lets someone lock a known address out for
@@ -61,7 +61,9 @@ class LoginRateLimiter:
     def __init__(
         self,
         *,
-        per_ip_limit: int = 20,
+        # Generous because behind the Compose network every client can share one
+        # address (see ADR 0002); the per-email limit is the real brake.
+        per_ip_limit: int = 100,
         per_email_limit: int = 5,
         window_seconds: float = 900,
         clock: Callable[[], float] = time.monotonic,
