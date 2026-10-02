@@ -108,8 +108,9 @@ app role:
   the org before it sets `app.org_id`, and it answers 404 for orgs the user is
   not in so their existence is not revealed (`api/app/orgs/access.py`).
 - Work that has no user, such as background jobs, needs its own path to a
-  tenant context. Phase 2 adds a claim function that returns a job's org, and
-  the worker then sets context and runs under RLS like the API.
+  tenant context. A claim function returns a job's org, and the worker then
+  sets context and runs under RLS like the API. See
+  [ADR 0004](0004-job-queue.md).
 - Logins and session lookups happen before any context exists, and FORCE RLS
   binds the owner too. Narrow SECURITY DEFINER functions in schema `auth`
   serve them, owned by the dedicated `inspection_auth` role (NOLOGIN,

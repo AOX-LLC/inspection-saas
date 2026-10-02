@@ -189,6 +189,11 @@ services:
     environment:
       APP_ENV: demo
       MODEL_MODE: ${MODEL_MODE:-mock}
+      # Tiling and worker settings; see .env.example.
+      TILE_SIZE: ${TILE_SIZE:-640}
+      TILE_OVERLAP: ${TILE_OVERLAP:-128}
+      MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-50000000}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
     volumes:
       - secrets:/run/inspection-secrets:ro
     depends_on:

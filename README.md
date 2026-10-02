@@ -8,7 +8,7 @@ Built by [AOX](https://automatedoperationsexperts.com).
 
 ## Status
 
-Phase 1b: the API has tenancy and database isolation (1a), login with server-side sessions, org membership and role checks, projects, and presigned image upload and download through an object store. There is no web app yet; it arrives in a later phase. Use the API with `curl` as shown below.
+Phase 2a: the API has tenancy and database isolation, login with server-side sessions, org membership and role checks, projects, and presigned image upload and download through an object store. A completed upload is now cut into detector-sized tiles in the background by a worker, and a project's progress can be read through the API. There is no web app and no detector yet; they arrive in later phases. Use the API with `curl` as shown below.
 
 ## Run it
 
@@ -35,9 +35,22 @@ curl -s -c jar -H 'Origin: http://127.0.0.1:4700' -H 'Content-Type: application/
 curl -s -b jar http://127.0.0.1:4701/orgs/$ORG/projects
 ```
 
-`scripts/smoke.sh` walks the whole path (login, upload, complete, download, cross-org 404, logout) against a running stack.
+`scripts/smoke.sh` walks the whole path (login, upload, complete, wait for the worker to tile it, download, cross-org 404, logout) against a running stack.
 
-Run the test suite: the isolation suite, the API suite and the storage suite. It uses its own `inspection_test` database, never the seeded one:
+Process a batch of 50 synthetic photos in the background and see how long it takes (needs `uv`; it uses only the demo seed and generated images):
+
+```sh
+cd api && uv run python ../scripts/batch_demo.py
+```
+
+Read a project's progress yourself, as a member of its org:
+
+```sh
+curl -s -b jar http://127.0.0.1:4701/orgs/$ORG/projects/$PROJECT/photos/progress
+# {"total":50,"counts":{"queued":0,"processing":0,"tiled":50,"failed":0},"finished":true}
+```
+
+Run the test suite: the isolation suite, the API suite, the storage suite and the worker suite. It uses its own `inspection_test` database, never the seeded one:
 
 ```sh
 docker compose --profile test run --rm --build test
@@ -78,9 +91,9 @@ Each org has two projects whose names start with "Synthetic", and each project h
 
 ## How tenancy works
 
-Every table uses Postgres row-level security, with both ENABLE and FORCE. The API connects as a role that owns nothing and cannot bypass RLS. Tenant context is set per transaction with `set_config(..., true)`, so it cannot leak across pooled connections. If the context is missing, a query raises an error as soon as it reaches a row, so it never returns rows.
+Every table uses Postgres row-level security, with both ENABLE and FORCE. The API and the background worker each connect as a role that owns nothing and cannot bypass RLS. Tenant context is set per transaction with `set_config(..., true)`, so it cannot leak across pooled connections. If the context is missing, a query raises an error as soon as it reaches a row, so it never returns rows. The worker finds its next job through one narrow function that returns ids only, then works inside a transaction scoped to that job's org.
 
-More detail: [docs/architecture.md](docs/architecture.md), [ADR 0001 (object store)](docs/adr/0001-object-store.md), [ADR 0002 (authentication)](docs/adr/0002-auth.md) and [ADR 0003 (tenancy)](docs/adr/0003-tenancy.md).
+More detail: [docs/architecture.md](docs/architecture.md), [ADR 0001 (object store)](docs/adr/0001-object-store.md), [ADR 0002 (authentication)](docs/adr/0002-auth.md) and [ADR 0003 (tenancy)](docs/adr/0003-tenancy.md) and [ADR 0004 (job queue and worker)](docs/adr/0004-job-queue.md).
 
 ## Repository layout
 
@@ -89,7 +102,7 @@ api/                  FastAPI app, Alembic migrations, tests
 infra/postgres/init/  roles and databases
 infra/garage/         object store configuration
 infra/secrets/        credential generation
-scripts/              smoke test
+scripts/              smoke test and the 50-photo batch timing script
 docs/                 architecture notes and ADRs
 compose.yaml          local stack
 ```
