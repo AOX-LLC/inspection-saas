@@ -108,3 +108,27 @@ def test_keys_outside_the_layout_are_refused(key):
 )
 def test_content_is_recognised_by_its_leading_bytes(head, expected):
     assert detect_content_type(head) == expected
+
+
+def test_staging_key_is_a_sibling_of_the_original():
+    from app.storage.keys import staging_key
+
+    assert staging_key(ORG, PROJECT, FILE) == (f"orgs/{ORG}/projects/{PROJECT}/files/{FILE}/upload")
+
+
+def test_tile_keys_sit_under_the_photo_prefix():
+    from app.storage.keys import photo_prefix, tile_key
+
+    photo = FILE
+    key = tile_key(ORG, PROJECT, photo, 0, 512, 1024)
+
+    assert key == f"orgs/{ORG}/projects/{PROJECT}/photos/{photo}/tiles/0_512_1024.jpg"
+    assert key.startswith(photo_prefix(ORG, PROJECT, photo))
+
+
+@pytest.mark.parametrize("bad", [-1, True, 1.5, "1", None])
+def test_tile_coordinates_must_be_non_negative_integers(bad):
+    from app.storage.keys import tile_key
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        tile_key(ORG, PROJECT, FILE, 0, bad, 0)

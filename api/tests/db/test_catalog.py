@@ -11,11 +11,30 @@ import pytest
 APP_ROLE = "inspection_app"
 OWNER_ROLE = "inspection_owner"
 AUTH_ROLE = "inspection_auth"
+WORKER_ROLE = "inspection_worker"
+DISPATCHER_ROLE = "inspection_dispatcher"
 
 # Who may own SECURITY DEFINER functions, by schema. They run with the owner's
 # rights, so the owner is a decision, not a default: a new definer function
 # fails the ownership check until its schema is listed here on purpose.
-DEFINER_OWNER_BY_SCHEMA = {"auth": AUTH_ROLE}
+DEFINER_OWNER_BY_SCHEMA = {"auth": AUTH_ROLE, "queue": DISPATCHER_ROLE}
+
+# Exactly who may execute each SECURITY DEFINER function, besides its owner. A
+# new definer function fails until it is listed here on purpose, and a function
+# that is not listed is expected to have no grantee at all. Login and sessions
+# belong to the API; the queue, and the purge of dead sessions, to the worker.
+DEFINER_EXECUTE_GRANTEES = {
+    "auth.verify_login(text)": {APP_ROLE},
+    "auth.create_session(uuid,bytea,integer)": {APP_ROLE},
+    "auth.resolve_session(bytea,integer)": {APP_ROLE},
+    "auth.revoke_session(bytea)": {APP_ROLE},
+    "auth.purge_sessions(integer,integer)": {WORKER_ROLE},
+    "queue.jobs_claim(text,text[],integer)": {WORKER_ROLE},
+    "queue.jobs_complete(uuid,text)": {WORKER_ROLE},
+    "queue.jobs_fail(uuid,text,text,boolean,integer)": {WORKER_ROLE},
+    "queue.abandoned_uploads(integer,integer)": {WORKER_ROLE},
+    "queue.stuck_photos(integer)": {WORKER_ROLE},
+}
 
 # Global reference data (not tenant-owned) goes here, read-only for the app: a
 # table on this list must not grant the app INSERT, UPDATE or DELETE, because
@@ -34,6 +53,11 @@ EXPECTED_APP_PRIVILEGES = {
     "memberships": DML,
     "projects": DML,
     "files": DML,
+    # The API records an upload's photo and enqueues its job; the worker, not a
+    # request, changes them afterwards.
+    "photos": {"SELECT", "INSERT"},
+    "tiles": {"SELECT"},
+    "jobs": {"INSERT"},
     "audit_events": {"SELECT", "INSERT"},
     "sessions": set(),
     "credentials": set(),
@@ -168,11 +192,11 @@ def definer_functions_with_wrong_owner(connection: psycopg.Connection) -> dict[s
 
 
 def definer_functions_with_unexpected_execute(connection: psycopg.Connection) -> dict[str, set]:
-    """Definer functions whose EXECUTE grantees (besides the owner) are not exactly the app."""
+    """Definer functions whose EXECUTE grantees (besides the owner) are not the listed ones."""
     return {
         name: grantees
         for name, _, _, grantees in definer_functions(connection)
-        if grantees != {APP_ROLE}
+        if grantees != DEFINER_EXECUTE_GRANTEES.get(name, set())
     }
 
 
@@ -342,7 +366,7 @@ def app_column_grants(connection: psycopg.Connection) -> set[str]:
     return {row[0] for row in rows}
 
 
-@pytest.mark.parametrize("role", [APP_ROLE, OWNER_ROLE])
+@pytest.mark.parametrize("role", [APP_ROLE, OWNER_ROLE, WORKER_ROLE])
 def test_role_has_no_elevated_attributes(app_conn, role):
     row = app_conn.execute(
         """
@@ -372,8 +396,8 @@ def test_app_role_inherits_no_other_role(app_conn):
     assert count == 0
 
 
-def test_owner_may_set_role_to_auth_but_does_not_inherit_it(app_conn):
-    """The owner's only membership is the auth role, usable by SET ROLE and not inherited."""
+def test_owner_may_set_role_to_the_definer_roles_but_does_not_inherit_them(app_conn):
+    """The owner's only memberships are the two NOLOGIN definer roles: SET ROLE, no inherit."""
     memberships = app_conn.execute(
         """
         SELECT roleid::regrole::text, inherit_option, set_option, admin_option
@@ -381,7 +405,10 @@ def test_owner_may_set_role_to_auth_but_does_not_inherit_it(app_conn):
         """,
         (OWNER_ROLE,),
     ).fetchall()
-    assert memberships == [(AUTH_ROLE, False, True, False)]
+    assert sorted(memberships) == [
+        (AUTH_ROLE, False, True, False),
+        (DISPATCHER_ROLE, False, True, False),
+    ]
 
 
 def test_nobody_else_is_a_member_of_the_auth_role(app_conn):
@@ -443,7 +470,8 @@ def test_auth_role_holds_only_the_grants_it_needs(app_conn):
     assert granted == {
         "users": {"SELECT"},
         "credentials": {"SELECT", "INSERT", "UPDATE"},
-        "sessions": {"SELECT", "INSERT", "UPDATE"},
+        # DELETE is for auth.purge_sessions, which the worker's cleanup calls.
+        "sessions": {"SELECT", "INSERT", "UPDATE", "DELETE"},
     }
 
 
@@ -658,14 +686,20 @@ def test_definer_functions_exist(app_conn):
         "auth.create_session(uuid,bytea,integer)",
         "auth.resolve_session(bytea,integer)",
         "auth.revoke_session(bytea)",
+        "auth.purge_sessions(integer,integer)",
+        "queue.jobs_claim(text,text[],integer)",
+        "queue.jobs_complete(uuid,text)",
+        "queue.jobs_fail(uuid,text,text,boolean,integer)",
+        "queue.abandoned_uploads(integer,integer)",
+        "queue.stuck_photos(integer)",
     }
 
 
-def test_definer_functions_are_owned_by_the_auth_role(app_conn):
+def test_definer_functions_are_owned_by_their_schemas_approved_role(app_conn):
     assert definer_functions_with_wrong_owner(app_conn) == {}
 
 
-def test_definer_functions_are_executable_by_the_app_alone(app_conn):
+def test_definer_functions_are_executable_by_their_listed_roles_alone(app_conn):
     assert definer_functions_with_unexpected_execute(app_conn) == {}
 
 

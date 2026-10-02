@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from app.config import get_settings
-from app.storage.keys import original_key
+from app.storage.keys import original_key, staging_key
 from app.storage.s3 import ObjectStore
 from tests.api.conftest import World
 from tests.db.conftest import owner_conninfo, set_context
@@ -47,15 +47,6 @@ async def send_to_store(upload: dict, body: bytes) -> httpx.Response:
 async def fetch(url: str) -> httpx.Response:
     async with httpx.AsyncClient(timeout=10) as http:
         return await http.get(url)
-
-
-@pytest.fixture
-def cleanup():
-    keys: list[str] = []
-    yield keys
-    store = ObjectStore(get_settings())
-    for key in keys:
-        store.delete(key)
 
 
 def audit_actions(org_id: UUID) -> list[str]:
@@ -309,7 +300,9 @@ async def test_the_client_filename_never_reaches_the_key(signed_in, world: World
     file_id = UUID(upload["file_id"])
     key = original_key(world.alpha.id, world.alpha.project_id, file_id)
     cleanup.append(key)
-    assert upload["upload"]["fields"]["key"] == key
+    assert upload["upload"]["fields"]["key"] == staging_key(
+        world.alpha.id, world.alpha.project_id, file_id
+    )
     listing = await client.get(files_url(world.alpha.id, world.alpha.project_id))
     stored_name = next(i for i in listing.json()["items"] if i["id"] == str(file_id))[
         "original_filename"
@@ -376,7 +369,9 @@ async def test_complete_checks_the_magic_bytes(signed_in, world: World, declared
     assert done.status_code == 422
     listing = await client.get(files_url(world.alpha.id, world.alpha.project_id))
     assert next(i for i in listing.json()["items"] if i["id"] == str(file_id))["status"] == "failed"
-    assert ObjectStore(get_settings()).inspect(key) is None  # rejected bytes are removed
+    store = ObjectStore(get_settings())
+    assert store.inspect(key) is None  # rejected bytes are removed
+    assert store.inspect(staging_key(world.alpha.id, world.alpha.project_id, file_id)) is None
     link = await client.get(
         f"{files_url(world.alpha.id, world.alpha.project_id)}/{file_id}/download"
     )
@@ -429,3 +424,275 @@ async def test_downloads_force_the_stored_type_whatever_the_object_says(signed_i
 
     assert fetched.headers["content-type"] == "image/jpeg"
     assert fetched.headers["content-disposition"].startswith("attachment;")
+
+
+# The staging key ------------------------------------------------------------------
+
+
+async def _finished_upload(client, world: World, body: bytes, cleanup) -> tuple[dict, UUID]:
+    start = await create_upload(client, world.alpha.id, world.alpha.project_id, size=len(body))
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    cleanup.append(original_key(world.alpha.id, world.alpha.project_id, file_id))
+    assert (await send_to_store(upload, body)).status_code in (200, 201, 204)
+    done = await client.post(
+        f"{files_url(world.alpha.id, world.alpha.project_id)}/{file_id}/complete"
+    )
+    assert done.status_code == 200, done.text
+    return upload, file_id
+
+
+async def test_the_presigned_post_never_targets_the_final_key(signed_in, world: World, cleanup):
+    client = await signed_in(world.alpha.inspector)
+    start = await create_upload(client, world.alpha.id, world.alpha.project_id)
+    file_id = UUID(start.json()["file_id"])
+    cleanup.append(original_key(world.alpha.id, world.alpha.project_id, file_id))
+
+    key = start.json()["upload"]["fields"]["key"]
+
+    assert key == staging_key(world.alpha.id, world.alpha.project_id, file_id)
+    assert key != original_key(world.alpha.id, world.alpha.project_id, file_id)
+
+
+async def test_a_finished_upload_cannot_be_overwritten_through_its_post(
+    signed_in, world: World, cleanup
+):
+    """The presigned POST outlives `complete` by minutes; the final object must not move."""
+    client = await signed_in(world.alpha.inspector)
+    png = image_bytes("PNG")
+    upload, file_id = await _finished_upload(client, world, png, cleanup)
+
+    replay = await send_to_store(upload, b"\x89PNG\r\n\x1a\n" + b"X" * 50)
+
+    assert replay.status_code in (200, 201, 204)  # the store still honours its own policy
+    link = await client.get(
+        f"{files_url(world.alpha.id, world.alpha.project_id)}/{file_id}/download"
+    )
+    assert (await fetch(link.json()["url"])).content == png
+
+
+async def test_complete_removes_the_staged_object(signed_in, world: World, cleanup):
+    client = await signed_in(world.alpha.inspector)
+    _, file_id = await _finished_upload(client, world, image_bytes("PNG"), cleanup)
+
+    store = ObjectStore(get_settings())
+
+    assert store.inspect(staging_key(world.alpha.id, world.alpha.project_id, file_id)) is None
+    assert store.inspect(original_key(world.alpha.id, world.alpha.project_id, file_id)) is not None
+
+
+async def test_the_final_object_carries_the_database_content_type(signed_in, world: World, cleanup):
+    client = await signed_in(world.alpha.inspector)
+    _, file_id = await _finished_upload(client, world, image_bytes("PNG"), cleanup)
+
+    key = original_key(world.alpha.id, world.alpha.project_id, file_id)
+    head = ObjectStore(get_settings())._operations.head_object(
+        Bucket=get_settings().s3_bucket, Key=key
+    )
+
+    assert head["ContentType"] == "image/png"
+
+
+async def test_a_swap_after_the_check_is_caught_on_the_copy(
+    signed_in, world: World, cleanup, monkeypatch
+):
+    """If the bytes that land at the final key are not an image, the upload fails."""
+    client = await signed_in(world.alpha.inspector)
+    body = image_bytes("PNG")
+    start = await create_upload(client, world.alpha.id, world.alpha.project_id, size=len(body))
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    key = original_key(world.alpha.id, world.alpha.project_id, file_id)
+    cleanup.append(key)
+    assert (await send_to_store(upload, body)).status_code in (200, 201, 204)
+
+    def hostile_copy(self, source, target, *, content_type, if_match):
+        # As if the staged object had been swapped between check and copy and the
+        # store's precondition had not caught it.
+        self.put(target, b"<html>not an image</html>", content_type)
+
+    monkeypatch.setattr(ObjectStore, "copy", hostile_copy)
+    done = await client.post(
+        f"{files_url(world.alpha.id, world.alpha.project_id)}/{file_id}/complete"
+    )
+
+    assert done.status_code == 422
+    store = ObjectStore(get_settings())
+    assert store.inspect(key) is None
+    assert store.inspect(staging_key(world.alpha.id, world.alpha.project_id, file_id)) is None
+
+
+# Claiming the row ------------------------------------------------------------------
+
+
+def set_file_status(org_id: UUID, file_id: UUID, new_status: str) -> None:
+    with psycopg.connect(owner_conninfo(), autocommit=True) as connection, connection.transaction():
+        set_context(connection, org_id=org_id)
+        connection.execute("UPDATE files SET status = %s WHERE id = %s", (new_status, file_id))
+
+
+def file_status(org_id: UUID, file_id: UUID) -> str:
+    with psycopg.connect(owner_conninfo(), autocommit=True) as connection, connection.transaction():
+        set_context(connection, org_id=org_id)
+        return connection.execute("SELECT status FROM files WHERE id = %s", (file_id,)).fetchone()[
+            0
+        ]
+
+
+async def test_two_concurrent_completions_publish_once(signed_in, world: World, cleanup):
+    import asyncio
+
+    client = await signed_in(world.alpha.inspector)
+    other = await signed_in(world.alpha.inspector)
+    org, project = world.alpha.id, world.alpha.project_id
+    png = image_bytes("PNG")
+    start = await create_upload(client, org, project, size=len(png) + 500)
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    cleanup.append(original_key(org, project, file_id))
+    assert (await send_to_store(upload, png)).status_code in (200, 201, 204)
+    url = f"{files_url(org, project)}/{file_id}/complete"
+
+    first, second = await asyncio.gather(client.post(url), other.post(url))
+
+    assert sorted([first.status_code, second.status_code]) == [200, 409]
+    store = ObjectStore(get_settings())
+    assert store.read(original_key(org, project, file_id), max_bytes=10_000) == png
+    with psycopg.connect(owner_conninfo(), autocommit=True) as connection, connection.transaction():
+        set_context(connection, org_id=org)
+        photos = connection.execute(
+            "SELECT count(*) FROM photos WHERE file_id = %s", (file_id,)
+        ).fetchone()[0]
+    assert photos == 1
+
+
+async def test_an_upload_someone_else_is_completing_is_not_touched(
+    signed_in, world: World, cleanup
+):
+    client = await signed_in(world.alpha.inspector)
+    org, project = world.alpha.id, world.alpha.project_id
+    png = image_bytes("PNG")
+    start = await create_upload(client, org, project, size=len(png))
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    cleanup.append(original_key(org, project, file_id))
+    assert (await send_to_store(upload, png)).status_code in (200, 201, 204)
+    set_file_status(org, file_id, "completing")
+
+    again = await client.post(f"{files_url(org, project)}/{file_id}/complete")
+
+    assert again.status_code == 409
+    assert file_status(org, file_id) == "completing"
+    store = ObjectStore(get_settings())
+    assert store.inspect(original_key(org, project, file_id)) is None  # nothing was copied
+    set_file_status(org, file_id, "failed")  # not left behind for the next test
+
+
+async def test_a_storage_failure_while_completing_leaves_the_upload_completable(
+    signed_in, world: World, cleanup, monkeypatch
+):
+    from botocore.exceptions import ClientError
+
+    client = await signed_in(world.alpha.inspector)
+    org, project = world.alpha.id, world.alpha.project_id
+    png = image_bytes("PNG")
+    start = await create_upload(client, org, project, size=len(png))
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    cleanup.append(original_key(org, project, file_id))
+    assert (await send_to_store(upload, png)).status_code in (200, 201, 204)
+    real_copy = ObjectStore.copy
+
+    def down(self, *args, **kwargs):
+        raise ClientError({"Error": {"Code": "503", "Message": "down"}}, "CopyObject")
+
+    monkeypatch.setattr(ObjectStore, "copy", down)
+    with pytest.raises(ClientError):
+        await client.post(f"{files_url(org, project)}/{file_id}/complete")
+    assert file_status(org, file_id) == "pending"
+
+    monkeypatch.setattr(ObjectStore, "copy", real_copy)
+    done = await client.post(f"{files_url(org, project)}/{file_id}/complete")
+
+    assert done.status_code == 200
+
+
+async def test_completing_an_upload_that_does_not_exist_is_a_404(signed_in, world: World):
+    client = await signed_in(world.alpha.inspector)
+
+    response = await client.post(
+        f"{files_url(world.alpha.id, world.alpha.project_id)}/{uuid4()}/complete"
+    )
+
+    assert response.status_code == 404
+
+
+async def test_photos_waiting_to_be_processed_are_capped_per_org(
+    signed_in, world: World, monkeypatch, cleanup
+):
+    from app.files import router
+
+    client = await signed_in(world.alpha.inspector)
+    with psycopg.connect(owner_conninfo(), autocommit=True) as connection, connection.transaction():
+        set_context(connection, org_id=world.alpha.id)
+        waiting = connection.execute(
+            "SELECT count(*) FROM photos WHERE status IN ('queued', 'processing')"
+        ).fetchone()[0]
+    monkeypatch.setattr(router, "MAX_UNPROCESSED_PHOTOS", waiting)
+
+    blocked = await create_upload(client, world.alpha.id, world.alpha.project_id)
+
+    assert blocked.status_code == 429
+    other = await signed_in(world.beta.inspector)
+    ok = await create_upload(other, world.beta.id, world.beta.project_id)
+    cleanup.append(original_key(world.beta.id, world.beta.project_id, UUID(ok.json()["file_id"])))
+    assert ok.status_code == 201
+
+
+async def test_an_upload_too_old_to_be_completed_is_refused_and_left_for_cleanup(
+    signed_in, world: World, cleanup
+):
+    client = await signed_in(world.alpha.inspector)
+    org, project = world.alpha.id, world.alpha.project_id
+    png = image_bytes("PNG")
+    start = await create_upload(client, org, project, size=len(png))
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    cleanup.append(original_key(org, project, file_id))
+    assert (await send_to_store(upload, png)).status_code in (200, 201, 204)
+    with psycopg.connect(owner_conninfo(), autocommit=True) as connection, connection.transaction():
+        set_context(connection, org_id=org)
+        connection.execute(
+            "UPDATE files SET created_at = now() - interval '2 hours' WHERE id = %s", (file_id,)
+        )
+
+    late = await client.post(f"{files_url(org, project)}/{file_id}/complete")
+
+    assert late.status_code == 409
+    assert "expired" in late.json()["detail"]
+    assert file_status(org, file_id) == "pending"  # untouched: the cleanup will remove it
+    assert ObjectStore(get_settings()).inspect(original_key(org, project, file_id)) is None
+
+
+async def test_a_storage_hiccup_after_the_commit_does_not_fail_a_finished_upload(
+    signed_in, world: World, cleanup, monkeypatch
+):
+    from botocore.exceptions import ClientError
+
+    client = await signed_in(world.alpha.inspector)
+    org, project = world.alpha.id, world.alpha.project_id
+    png = image_bytes("PNG")
+    start = await create_upload(client, org, project, size=len(png))
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    cleanup.append(original_key(org, project, file_id))
+    assert (await send_to_store(upload, png)).status_code in (200, 201, 204)
+
+    def down(self, key):
+        raise ClientError({"Error": {"Code": "503", "Message": "down"}}, "DeleteObject")
+
+    monkeypatch.setattr(ObjectStore, "delete", down)
+    done = await client.post(f"{files_url(org, project)}/{file_id}/complete")
+
+    assert done.status_code == 200
+    assert file_status(org, file_id) == "ready"

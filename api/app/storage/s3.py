@@ -30,6 +30,11 @@ class PresignedPost:
 class ObjectInfo:
     size_bytes: int
     head: bytes
+    etag: str
+
+
+class ObjectChanged(Exception):
+    """The object was replaced between being inspected and being copied."""
 
 
 def _client(endpoint: str, region: str, access_key_id: str, secret_access_key: str) -> BaseClient:
@@ -111,15 +116,49 @@ class ObjectStore:
     def inspect(self, key: str) -> ObjectInfo | None:
         """Size and leading bytes of an object, or None if it does not exist."""
         try:
-            size = self._operations.head_object(Bucket=self._bucket, Key=key)["ContentLength"]
+            meta = self._operations.head_object(Bucket=self._bucket, Key=key)
+            # Pinned to the etag just read, so the head belongs to the object measured.
             body = self._operations.get_object(
-                Bucket=self._bucket, Key=key, Range=f"bytes=0-{SNIFF_BYTES - 1}"
+                Bucket=self._bucket,
+                Key=key,
+                Range=f"bytes=0-{SNIFF_BYTES - 1}",
+                IfMatch=meta["ETag"],
             )["Body"]
-            return ObjectInfo(size_bytes=size, head=body.read(SNIFF_BYTES))
+            return ObjectInfo(
+                size_bytes=meta["ContentLength"], head=body.read(SNIFF_BYTES), etag=meta["ETag"]
+            )
         except ClientError as error:
             if error.response["Error"]["Code"] in {"404", "NoSuchKey", "NotFound"}:
                 return None
             raise
+
+    def copy(self, source_key: str, target_key: str, *, content_type: str, if_match: str) -> None:
+        """Server-side copy that fails with ObjectChanged if the source's etag moved.
+
+        The content type is written explicitly, not inherited, so the stored
+        object always carries the type the database holds.
+        """
+        try:
+            self._operations.copy_object(
+                Bucket=self._bucket,
+                Key=target_key,
+                CopySource={"Bucket": self._bucket, "Key": source_key},
+                CopySourceIfMatch=if_match,
+                ContentType=content_type,
+                MetadataDirective="REPLACE",
+            )
+        except ClientError as error:
+            if error.response["Error"]["Code"] in {"PreconditionFailed", "412"}:
+                raise ObjectChanged(source_key) from error
+            raise
+
+    def read(self, key: str, *, max_bytes: int) -> bytes:
+        """The whole object, refusing to buffer more than `max_bytes`."""
+        response = self._operations.get_object(Bucket=self._bucket, Key=key)
+        if response["ContentLength"] > max_bytes:
+            response["Body"].close()
+            raise ValueError("object is larger than the allowed size")
+        return response["Body"].read(max_bytes + 1)
 
     def put(self, key: str, body: bytes, content_type: str) -> None:
         """Server-side write, for the seed and tests. Uploads from clients are presigned."""

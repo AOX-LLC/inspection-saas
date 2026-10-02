@@ -1,6 +1,7 @@
 """Audit events. Written inside the caller's tenant transaction, so an event and
 the change it records commit or roll back together. The app role can only
-insert and read this table."""
+insert and read this table. `actor_user_id` is None for work no person started,
+such as the worker's cleanup."""
 
 import json
 from uuid import UUID
@@ -20,7 +21,7 @@ async def record(
     session: AsyncSession,
     *,
     org_id: UUID,
-    actor_user_id: UUID,
+    actor_user_id: UUID | None,
     action: str,
     target_type: str,
     target_id: UUID,

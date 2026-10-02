@@ -8,6 +8,7 @@ Stack: Python 3.12, FastAPI, SQLAlchemy 2 async with psycopg 3, Alembic with pla
 
 - Start: `docker compose up -d --wait`
 - Health: `curl http://127.0.0.1:4701/health`
+- 50-photo batch against a running stack: `cd api && uv run python ../scripts/batch_demo.py`
 - Tests: `docker compose --profile test run --rm --build test`
 - Stop: `docker compose down` (`-v` also deletes data and generated credentials)
 - Lint: `cd api && uv run ruff check . && uv run ruff format --check .`
@@ -23,6 +24,8 @@ These are invariants. Do not relax them.
 - The API connects as `inspection_app`, which owns nothing and has no BYPASSRLS. Migrations and seed run as `inspection_owner`. Never grant the app role ownership, TRUNCATE or BYPASSRLS.
 - A new table must pass the catalog tests in `api/tests/db/`: RLS is forced on every table unless it is on the explicit global allowlist.
 - Never weaken a policy or grant to make a test pass. Fix the test or the code.
+- Background work gets a tenant context only by claiming a job through `queue.jobs_claim` and then using `tenant_transaction` for the job's org. `inspection_worker` has no `BYPASSRLS` and no grant on `jobs` or `sessions`; add a narrow SECURITY DEFINER function, owned by the matching NOLOGIN role, rather than a grant. A job payload holds ids only.
+- A presigned POST targets a staging key, never a final one.
 
 ## Data and secrets
 

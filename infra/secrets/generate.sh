@@ -5,6 +5,7 @@
 # Each consumer gets its own directory, readable only by its group:
 #   db/     gid 999   postgres: superuser, owner and app passwords (for initdb)
 #   app/    gid 10001 api: the app role's password
+#   worker/ gid 10006 worker: the worker role's password
 #   owner/  gid 10002 migrate and seed: the owner role's password
 #   objectstore/ uid 10004 object store and its init: cluster RPC secret, admin token
 #   storage/     gid 10005 api, seed, init, tests: the S3 key the API signs with
@@ -65,15 +66,17 @@ lock_down_to_user() {
   chown -R "$uid:$uid" "$dir"
 }
 
-mkdir -p "$SECRETS_DIR/db" "$SECRETS_DIR/app" "$SECRETS_DIR/owner" \
+mkdir -p "$SECRETS_DIR/db" "$SECRETS_DIR/app" "$SECRETS_DIR/owner" "$SECRETS_DIR/worker" \
   "$SECRETS_DIR/objectstore" "$SECRETS_DIR/storage"
 chmod 0755 "$SECRETS_DIR"
 
 write_once "$SECRETS_DIR/db/postgres_password"
 write_once "$SECRETS_DIR/db/owner_password"
 write_once "$SECRETS_DIR/db/app_password"
+write_once "$SECRETS_DIR/db/worker_password"
 copy_into "$SECRETS_DIR/db/app_password" "$SECRETS_DIR/app/app_password"
 copy_into "$SECRETS_DIR/db/owner_password" "$SECRETS_DIR/owner/owner_password"
+copy_into "$SECRETS_DIR/db/worker_password" "$SECRETS_DIR/worker/worker_password"
 
 # After the first run root can no longer enter the directory, so it is skipped.
 if [ "$(stat -c %u "$SECRETS_DIR/objectstore")" != 10004 ]; then
@@ -86,6 +89,7 @@ write_once "$SECRETS_DIR/storage/s3_secret_access_key"
 lock_down "$SECRETS_DIR/db" 999
 lock_down "$SECRETS_DIR/app" 10001
 lock_down "$SECRETS_DIR/owner" 10002
+lock_down "$SECRETS_DIR/worker" 10006
 lock_down_to_user "$SECRETS_DIR/objectstore" 10004
 lock_down "$SECRETS_DIR/storage" 10005
 

@@ -173,6 +173,52 @@ services:
       retries: 20
       start_period: 5s
 
+  # Background jobs: tiling now, and later the model pass and reports. The same
+  # image as the API, run as the worker role. It decodes whole photos, so its
+  # memory limit is the largest of the application services: a 50-megapixel
+  # photo peaks near 500 MB while it is decoded, so one job at a time fits and
+  # two would not. Raise WORKER_CONCURRENCY only together with this limit.
+  worker:
+    mem_limit: 768m
+    <<: *hardening
+    build: *api-build
+    image: *api-image
+    user: "10006:10006"
+    group_add: ["10005"]
+    # One worker serves every org, so a crash must not stop tiling until someone notices.
+    restart: unless-stopped
+    pids_limit: 128
+    cpus: 2
+    command: ["python", "-m", "app.worker"]
+    # Time to finish the job in hand after SIGTERM before it is killed.
+    stop_grace_period: 30s
+    environment:
+      APP_ENV: demo
+      MODEL_MODE: ${MODEL_MODE:-mock}
+      # Tiling and worker settings; see .env.example.
+      TILE_SIZE: ${TILE_SIZE:-640}
+      TILE_OVERLAP: ${TILE_OVERLAP:-128}
+      MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-50000000}
+      MAX_TILES_PER_PHOTO: ${MAX_TILES_PER_PHOTO:-512}
+      TILE_JPEG_QUALITY: ${TILE_JPEG_QUALITY:-85}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+      JOB_LOCK_SECONDS: ${JOB_LOCK_SECONDS:-300}
+      CLEANUP_INTERVAL_SECONDS: ${CLEANUP_INTERVAL_SECONDS:-300}
+      ABANDONED_UPLOAD_SECONDS: ${ABANDONED_UPLOAD_SECONDS:-3600}
+    volumes:
+      - secrets:/run/inspection-secrets:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      objectstore-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
   test:
     mem_limit: 512m
     <<: *hardening
@@ -182,7 +228,7 @@ services:
       target: test
     image: inspection-saas-api:test
     user: "10003:10003"
-    group_add: ["10001", "10002", "10005"]
+    group_add: ["10001", "10002", "10005", "10006"]
     environment:
       APP_ENV: test
       DB_NAME: inspection_test

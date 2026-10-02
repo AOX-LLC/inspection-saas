@@ -12,41 +12,68 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 WIDTH, HEIGHT = 640, 480
 STAMP = "SYNTHETIC DEMO"
 JPEG_QUALITY = 70
+EXIF_ORIENTATION = 0x0112
 
 
-def render_demo_image(caption: str, seed: int) -> bytes:
-    """A JPEG of grey concrete-like noise with a diagonal crack line and a stamp."""
+def render_demo_photo(
+    caption: str, seed: int, *, width: int = WIDTH, height: int = HEIGHT
+) -> Image.Image:
+    """Grey concrete-like noise with a diagonal crack line and a stamp, at any size.
+
+    Stamp, crack and footer scale with the width, so the 640 x 480 default is
+    unchanged and a larger photo looks like a larger version of it.
+    """
+    scale = width / WIDTH
     rng = random.Random(seed)  # noqa: S311 (texture, not security)
-    noise = Image.frombytes("L", (WIDTH, HEIGHT), rng.randbytes(WIDTH * HEIGHT))
-    texture = noise.filter(ImageFilter.GaussianBlur(radius=1.5)).convert("RGB")
-    tint = Image.new("RGB", (WIDTH, HEIGHT), (120, 118, 112))
+    noise = Image.frombytes("L", (width, height), rng.randbytes(width * height))
+    texture = noise.filter(ImageFilter.GaussianBlur(radius=1.5 * scale)).convert("RGB")
+    tint = Image.new("RGB", (width, height), (120, 118, 112))
     image = Image.blend(texture, tint, 0.6)
 
     draw = ImageDraw.Draw(image)
-    x, y = rng.randint(40, 200), 0
+    x, y = rng.randint(int(40 * scale), int(200 * scale)), 0
     points = [(x, y)]
-    while y < HEIGHT:
-        x += rng.randint(-14, 22)
-        y += rng.randint(18, 40)
-        points.append((x, min(y, HEIGHT)))
-    draw.line(points, fill=(35, 33, 31), width=3)
+    while y < height:
+        x += rng.randint(int(-14 * scale), int(22 * scale))
+        y += rng.randint(int(18 * scale), int(40 * scale))
+        points.append((x, min(y, height)))
+    draw.line(points, fill=(35, 33, 31), width=max(3, round(3 * scale)))
 
-    big = ImageFont.load_default(size=56)
-    small = ImageFont.load_default(size=22)
+    big = ImageFont.load_default(size=round(56 * scale))
+    small = ImageFont.load_default(size=round(22 * scale))
+    footer = round(36 * scale)
     draw.text(
-        (WIDTH // 2, HEIGHT // 2),
+        (width // 2, height // 2),
         STAMP,
         font=big,
         fill=(255, 255, 255),
         anchor="mm",
-        stroke_width=3,
+        stroke_width=max(3, round(3 * scale)),
         stroke_fill=(0, 0, 0),
     )
-    draw.rectangle((0, HEIGHT - 36, WIDTH, HEIGHT), fill=(0, 0, 0))
+    draw.rectangle((0, height - footer, width, height), fill=(0, 0, 0))
     draw.text(
-        (12, HEIGHT - 18), f"{STAMP} - {caption}", font=small, fill=(255, 255, 255), anchor="lm"
+        (round(12 * scale), height - footer // 2),
+        f"{STAMP} - {caption}",
+        font=small,
+        fill=(255, 255, 255),
+        anchor="lm",
     )
+    return image
 
+
+def encode_jpeg(image: Image.Image, *, orientation: int | None = None) -> bytes:
+    """JPEG bytes, optionally tagged with an EXIF orientation as a phone would."""
     buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=JPEG_QUALITY)
+    if orientation is None:
+        image.save(buffer, format="JPEG", quality=JPEG_QUALITY)
+    else:
+        exif = Image.Exif()
+        exif[EXIF_ORIENTATION] = orientation
+        image.save(buffer, format="JPEG", quality=JPEG_QUALITY, exif=exif)
     return buffer.getvalue()
+
+
+def render_demo_image(caption: str, seed: int) -> bytes:
+    """A 640 x 480 JPEG for the seed data."""
+    return encode_jpeg(render_demo_photo(caption, seed))

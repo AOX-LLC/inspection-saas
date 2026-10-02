@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end check against a running stack (`docker compose up -d --wait`):
 # log in, list projects, upload an image through a presigned POST, complete it,
-# fetch it back through a presigned GET, and confirm another org is a 404.
+# wait for the worker to tile it, fetch it back through a presigned GET, and
+# confirm another org is a 404.
 # Uses only the demo seed, which is synthetic.
 set -euo pipefail
 
@@ -68,6 +69,17 @@ curl --silent --show-error --fail-with-body --max-time 20 "${form[@]}" -F "file=
 step "complete the upload"
 api POST "/orgs/$ALPHA_ORG/projects/$project/files/$file_id/complete" \
   | jq -e '.status == "ready"' >/dev/null || fail "file is not ready"
+
+step "the worker tiles the photo, and the progress shows it"
+progress_path="/orgs/$ALPHA_ORG/projects/$project/photos/progress"
+for _ in $(seq 1 60); do
+  progress="$(api GET "$progress_path")"
+  if [ "$(jq -r '.finished' <<<"$progress")" = true ]; then break; fi
+  sleep 1
+done
+[ "$(jq -r '.finished' <<<"$progress")" = true ] || fail "the worker did not finish: $progress"
+[ "$(jq -r '.counts.failed' <<<"$progress")" = 0 ] || fail "a photo failed to tile: $progress"
+[ "$(jq -r '.counts.tiled' <<<"$progress")" -ge 1 ] || fail "no photo was tiled: $progress"
 
 step "download through a presigned GET and compare bytes"
 download_url="$(api GET "/orgs/$ALPHA_ORG/projects/$project/files/$file_id/download" | jq -er '.url')"
