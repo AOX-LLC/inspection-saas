@@ -60,11 +60,11 @@ Each org has two projects whose names start with "Synthetic".
 
 ## Mock mode
 
-`MODEL_MODE=mock` is the default. Recorded model responses are replayed and no API key is needed. See `.env.example`.
+`MODEL_MODE=mock` is the default. Recorded model responses will be replayed, so no API key is needed; nothing calls a model yet. See `.env.example`.
 
 ## How tenancy works
 
-Every table uses Postgres row-level security, with both ENABLE and FORCE. The API connects as a role that owns nothing and cannot bypass RLS. Tenant context is set per transaction with `set_config(..., true)`, so it cannot leak across pooled connections. If the context is missing, the query raises an error instead of returning an empty list.
+Every table uses Postgres row-level security, with both ENABLE and FORCE. The API connects as a role that owns nothing and cannot bypass RLS. Tenant context is set per transaction with `set_config(..., true)`, so it cannot leak across pooled connections. If the context is missing, a query raises an error as soon as it reaches a row, so it never returns rows.
 
 More detail: [docs/architecture.md](docs/architecture.md) and [docs/adr/0003-tenancy.md](docs/adr/0003-tenancy.md).
 

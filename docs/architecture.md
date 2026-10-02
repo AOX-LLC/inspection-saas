@@ -65,15 +65,17 @@ role cannot see.
 
 ## Tenancy
 
-Tenant isolation is enforced in Postgres with row-level security, and checked
-again in the API. [ADR 0003](adr/0003-tenancy.md) has the full reasoning. In
+Tenant isolation is enforced in Postgres with row-level security. From
+Phase 1b the API also checks membership before it sets an org context.
+[ADR 0003](adr/0003-tenancy.md) has the full reasoning. In
 short:
 
 1. Each request runs one transaction. It starts by calling
    `set_config('app.org_id', ..., true)` and `set_config('app.user_id', ..., true)`
    through `api/app/db/tenant.py`. The settings end with the transaction.
 2. Tenant-owned tables allow only rows whose `org_id` equals `app.org_id()`,
-   for reads and writes. With no context set, the accessor raises.
+   for reads and writes. With no context set, the accessor raises on any row
+   it checks, so no rows are ever returned.
 3. Identity tables allow a user's own rows and the rows of the context org,
    and show nothing without context.
 4. Children reference parents by `(org_id, id)`, so cross-org references are
@@ -99,7 +101,7 @@ catalog tests fail until it does.
 
 ## Model calls
 
-`MODEL_MODE=mock` is the default: model responses are replayed from
+`MODEL_MODE=mock` is the default: model responses will be replayed from
 recordings, so the app runs with no API key. `live` reads the viewer's own key
 from `.env`. Phase 1a defines the setting only; nothing calls a model yet.
 

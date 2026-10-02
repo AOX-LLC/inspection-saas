@@ -4,7 +4,8 @@ The isolation rules, in brief:
 
 * Tenant-owned tables (projects, files, audit_events) carry `org_id NOT NULL`.
   Their policies compare it with `app.org_id()`, which raises when no org
-  context is set, so a missing context fails loudly instead of looking empty.
+  context is set. It raises when a row is checked, so a missing context
+  never returns rows; a query that matches no rows at all may return empty.
 * Identity tables (orgs, users, memberships) need OR-composed policies, and
   Postgres does not promise to short-circuit OR. They use the null-safe
   accessors, so an unset context matches nothing.

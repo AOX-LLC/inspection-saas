@@ -3,6 +3,8 @@
 - Status: accepted
 - Date: 2026-10-02
 
+ADRs 0001 (object store) and 0002 (authentication) arrive with Phase 1b.
+
 ## Context
 
 Every org's photos, detections and reports must be invisible to every other
@@ -36,8 +38,13 @@ Session-level `SET` is never used.
 **Fail loudly.** Tenant-owned tables compare `org_id` with `app.org_id()`,
 which raises `insufficient_privilege` when the setting is unset or empty. A
 setting reverts to `''`, not NULL, after it has been set once in a session,
-so both count as unset. A bug that forgets the context therefore errors
-instead of returning an empty list that looks like "no data".
+so both count as unset. The accessor runs when a row is checked against the
+policy, so a bug that forgets the context errors on any query that reaches a
+row, instead of returning an empty list that looks like "no data". A query
+that matches no rows at all (an empty table, a lookup by a key that does not
+exist) may return empty without raising. It never returns rows, and the
+tests do not rely on it raising. Phase 1b adds a session-layer guard that
+refuses database work not opened through `tenant.py`.
 
 **Identity tables.** `orgs`, `users` and `memberships` must be readable before
 an org is chosen (to list a user's orgs) and their policies combine
@@ -77,15 +84,19 @@ statement rather than once per row, and indexes on `org_id` stay usable.
 `api/tests/db/` checks this design against a real Postgres, connecting as the
 app role:
 
-- Catalog: role attributes, ownership, exact per-table privileges, RLS forced
-  on every table outside an explicit global allowlist, and SECURITY DEFINER
+- Catalog: role attributes, ownership, exact per-table and no column-level
+  privileges, RLS forced on every table outside an explicit global allowlist,
+  every permissive policy on an `org_id` table comparing `org_id` with
+  `app.org_id()`, every FK between `org_id` tables carrying `org_id`, no
+  materialized views, foreign tables or owner-run views, and SECURITY DEFINER
   functions with a pinned `search_path` and no PUBLIC `EXECUTE`. Each check is
   also run against a deliberately unsafe object to prove it catches one, and
   new tables and functions are covered automatically.
-- Behaviour: unset context, cross-org reads and writes, rows moved between
-  orgs, the same physical connection reused across transactions (directly and
-  through the app's engine), FORCE on the owner, the locked tables, and the
-  composite FK.
+- Behaviour: unset context, cross-org reads and writes, upserts onto another
+  org's row, rows moved between orgs, identity rows for a member of two orgs,
+  the same physical connection reused across transactions (directly and
+  through the app's engine), FORCE on the owner, the locked tables, the
+  composite FK, and file object keys bound to their own org.
 
 ## Consequences
 
