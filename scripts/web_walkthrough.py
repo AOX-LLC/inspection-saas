@@ -146,13 +146,14 @@ def main_flow(browser: Browser, base: str, count: int, readme: Path | None, stat
             if "Uploading" in text and ("Processing" in text or "Done" in text or "Checking" in text):
                 break
             time.sleep(0.15)
+        page.mouse.move(0, 0)
         shot(page, readme, "uploading")
         shot(page, states, "05-uploading")
         throttle_upload(context, page, -1)
 
-        expect(page.get_by_text(f"All {count} photos uploaded and processed.")).to_be_visible(
-            timeout=180000
-        )
+        done = f"All {count} photos uploaded and processed."
+        expect(page.get_by_role("status").filter(has_text=done)).to_have_count(1, timeout=180000)
+        expect(panel.locator("p.muted").first).to_contain_text(done)
         shot(page, states, "06-batch-done")
 
         grid = page.locator('ul[aria-label="Photos"] img')
