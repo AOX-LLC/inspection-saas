@@ -175,7 +175,9 @@ services:
 
   # Background jobs: tiling now, and later the model pass and reports. The same
   # image as the API, run as the worker role. It decodes whole photos, so its
-  # memory limit is the largest of the application services.
+  # memory limit is the largest of the application services: a 50-megapixel
+  # photo peaks near 500 MB while it is decoded, so one job at a time fits and
+  # two would not. Raise WORKER_CONCURRENCY only together with this limit.
   worker:
     mem_limit: 768m
     <<: *hardening
@@ -183,6 +185,10 @@ services:
     image: *api-image
     user: "10006:10006"
     group_add: ["10005"]
+    # One worker serves every org, so a crash must not stop tiling until someone notices.
+    restart: unless-stopped
+    pids_limit: 128
+    cpus: 2
     command: ["python", "-m", "app.worker"]
     # Time to finish the job in hand after SIGTERM before it is killed.
     stop_grace_period: 30s
@@ -193,7 +199,12 @@ services:
       TILE_SIZE: ${TILE_SIZE:-640}
       TILE_OVERLAP: ${TILE_OVERLAP:-128}
       MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-50000000}
+      MAX_TILES_PER_PHOTO: ${MAX_TILES_PER_PHOTO:-512}
+      TILE_JPEG_QUALITY: ${TILE_JPEG_QUALITY:-85}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+      JOB_LOCK_SECONDS: ${JOB_LOCK_SECONDS:-300}
+      CLEANUP_INTERVAL_SECONDS: ${CLEANUP_INTERVAL_SECONDS:-300}
+      ABANDONED_UPLOAD_SECONDS: ${ABANDONED_UPLOAD_SECONDS:-3600}
     volumes:
       - secrets:/run/inspection-secrets:ro
     depends_on:

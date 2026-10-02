@@ -136,7 +136,11 @@ async def test_a_job_abandoned_mid_way_is_finished_by_the_next_claim(worker, org
         org.id,
         "INSERT INTO tiles (org_id, photo_id, level, x, y, src_width, src_height, scale, width,"
         " height, object_key) VALUES (%s, %s, 0, 7, 7, 10, 10, 1, 10, 10, %s)",
-        (org.id, photo.id, f"orgs/{org.id}/stale"),
+        (
+            org.id,
+            photo.id,
+            f"orgs/{org.id}/projects/{org.project_id}/photos/{photo.id}/tiles/stale.jpg",
+        ),
     )
     assert await worker.run_until_idle() == 0  # still locked: nothing to do yet
 

@@ -211,3 +211,41 @@ async def test_a_stale_heartbeat_is_unhealthy(tmp_path, settings, monkeypatch):
     )
 
     assert entrypoint.healthcheck() == 1
+
+
+async def test_a_job_that_runs_past_its_lock_is_given_up_on_and_retried(
+    running, org, store, monkeypatch
+):
+    async def stuck(self, job):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(tile_photo.TilePhoto, "run", stuck)
+    photo = add_photo(org, store, jpeg())
+    run = running(job_lock_seconds=1, worker_poll_seconds=0.2)
+
+    assert await until(lambda: job_state(org.id, photo.id) == ("queued", 1, "timeout"), within=10)
+    await run.shutdown()
+
+
+async def test_housekeeping_does_not_run_on_every_enqueue(running, org, store, monkeypatch):
+    from app.worker import runner
+    from app.worker.cleanup import Cleanup
+
+    runs = []
+    real = Cleanup.run_once
+
+    async def counted(self):
+        runs.append(1)
+        return await real(self)
+
+    monkeypatch.setattr(Cleanup, "run_once", counted)
+    monkeypatch.setattr(runner.random, "uniform", lambda a, b: 0.3)
+    run = running(cleanup_interval_seconds=3600)
+    assert await until(lambda: len(runs) == 1, within=5)
+
+    photos = [add_photo(org, store, jpeg()) for _ in range(4)]  # four notifications
+    assert await until(lambda: all(photo_state(p)[0] == "tiled" for p in photos), within=30)
+    await asyncio.sleep(0.5)
+
+    assert len(runs) == 1
+    await run.shutdown()

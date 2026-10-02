@@ -357,3 +357,33 @@ def test_tiles_carry_no_metadata_from_the_original():
         assert dict(image.getexif()) == {}
         assert b"Exif" not in jpeg[:64]
         assert b"Synthetic Camera Maker" not in jpeg
+
+
+def test_a_jpeg_comment_is_not_carried_into_tiles():
+    stored = encode(marked(900, 700), "JPEG", comment=b"inspector: J. Citizen, 12 Example St")
+    assert b"J. Citizen" in stored
+    produced = []
+
+    tile_image(
+        stored,
+        tile_size=TILE,
+        overlap=OVERLAP,
+        quality=85,
+        max_pixels=10**7,
+        max_tiles=512,
+        store=lambda spec, jpeg: produced.append(jpeg),
+    )
+
+    assert produced and all(b"J. Citizen" not in jpeg for jpeg in produced)
+    assert all("comment" not in Image.open(io.BytesIO(jpeg)).info for jpeg in produced)
+
+
+def test_a_grey_and_alpha_image_is_flattened_onto_white():
+    picture = Image.new("LA", (20, 10), (50, 255))
+    picture.paste((50, 0), (10, 0, 20, 10))  # right half fully transparent
+
+    image = open_oriented(encode(picture, "PNG"), max_pixels=10**7)
+
+    assert image.mode == "RGB"
+    assert image.getpixel((2, 5)) == (50, 50, 50)
+    assert image.getpixel((15, 5)) == (255, 255, 255)

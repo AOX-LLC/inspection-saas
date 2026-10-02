@@ -105,6 +105,16 @@ async def test_removing_an_upload_is_audited_with_no_actor(cleanup, org, store):
     assert events == [("upload.abandoned_removed", None, "file", file_id)]
 
 
+async def test_an_upload_stuck_completing_is_removed_like_an_abandoned_one(cleanup, org, store):
+    file_id = add_file(org, store, status="completing", age=2 * HOUR)
+
+    report = await cleanup.run_once()
+
+    assert report.uploads_removed == 1
+    assert file_row(org, file_id) is None
+    assert not exists(store, staging_key(org.id, org.project_id, file_id))
+
+
 async def test_a_recent_pending_upload_is_left_alone(cleanup, org, store):
     file_id = add_file(org, store, status="pending", age=60)
 
@@ -277,3 +287,51 @@ async def test_dead_sessions_are_purged_and_live_ones_kept(cleanup, user_id):
         True,
         True,
     )
+
+
+# Photos whose job failed ---------------------------------------------------------
+
+
+async def test_a_photo_whose_job_failed_without_telling_it_is_marked_failed(cleanup, org, store):
+    from tests.worker.conftest import add_photo, job_state, photo_state
+    from tests.worker.imaging import encode, gradient
+
+    photo = add_photo(org, store, encode(gradient(400, 300)))
+    query(org.id, "UPDATE photos SET status = 'processing' WHERE id = %s", (photo.id,))
+    query(
+        org.id,
+        "UPDATE jobs SET status = 'failed', attempts = 5, finished_at = now(),"
+        " last_error = 'worker lost after the last attempt'",
+    )
+
+    report = await cleanup.run_once()
+
+    assert report.photos_failed == 1
+    assert photo_state(photo) == ("failed", None, None, "worker_lost")
+    assert job_state(org.id, photo.id)[0] == "failed"
+    assert (await cleanup.run_once()).photos_failed == 0
+
+
+async def test_a_job_that_kills_its_worker_ends_with_a_failed_photo_after_cleanup(
+    cleanup, org, store, engine
+):
+    """The claim sweep fails the job in SQL; cleanup is what carries that to the photo."""
+    from app.worker.jobs import JobQueue
+    from tests.worker.conftest import add_photo, job_state, photo_state
+    from tests.worker.imaging import encode, gradient
+
+    photo = add_photo(org, store, encode(gradient(400, 300)), max_attempts=1)
+    queue = JobQueue(
+        engine, worker_id="dies", kinds=["tile_photo"], lock_seconds=60, backoff_seconds=1
+    )
+    assert await queue.claim() is not None  # then the worker dies
+    query(org.id, "UPDATE photos SET status = 'processing' WHERE id = %s", (photo.id,))
+    query(org.id, "UPDATE jobs SET locked_until = now() - interval '1 second'")
+
+    assert await queue.claim() is None  # the sweep fails the job instead of handing it out
+    assert job_state(org.id, photo.id)[0] == "failed"
+    assert photo_state(photo)[0] == "processing"
+
+    await cleanup.run_once()
+
+    assert photo_state(photo)[0] == "failed"

@@ -72,7 +72,6 @@ api POST "/orgs/$ALPHA_ORG/projects/$project/files/$file_id/complete" \
 
 step "the worker tiles the photo, and the progress shows it"
 progress_path="/orgs/$ALPHA_ORG/projects/$project/photos/progress"
-tiled="$(api GET "$progress_path" | jq -r '.counts.tiled')"
 for _ in $(seq 1 60); do
   progress="$(api GET "$progress_path")"
   if [ "$(jq -r '.finished' <<<"$progress")" = true ]; then break; fi

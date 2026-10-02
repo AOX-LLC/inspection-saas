@@ -156,8 +156,6 @@ class TilePhoto:
             raise JobError(error.code, retryable=False) from None
         except (ClientError, BotoCoreError):
             raise JobError("storage_error", retryable=True) from None
-        except MemoryError:
-            raise JobError("out_of_memory", retryable=False) from None
 
     async def _finish(
         self,

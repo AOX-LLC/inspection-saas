@@ -13,6 +13,7 @@ import contextlib
 import logging
 import os
 import random
+import secrets
 import socket
 from collections.abc import Mapping
 from pathlib import Path
@@ -53,7 +54,9 @@ class Worker:
         tile = TilePhoto(factory, store, settings)
         self._handlers: Mapping[str, Handler] = {tile.kind: tile}
         self._cleanup = Cleanup(engine, factory, store, settings)
-        self._name = f"{socket.gethostname()}-{os.getpid()}"
+        # The random part makes a lock holder's name unguessable: complete and fail
+        # act on a job only for the name that claimed it.
+        self._name = f"{socket.gethostname()}-{os.getpid()}-{secrets.token_hex(6)}"
         self._wake = asyncio.Event()
 
     def _queue(self, index: int) -> JobQueue:
@@ -111,7 +114,14 @@ class Worker:
         handler = self._handlers[job.kind]
         code, retryable = "", True
         try:
-            await handler.run(job)
+            # A hard stop at the lock's length. The thread doing a pathological
+            # decode cannot be interrupted, but the loop gives up on it and the
+            # job is released for another attempt rather than held forever.
+            async with asyncio.timeout(self._settings.job_lock_seconds):
+                await handler.run(job)
+        except TimeoutError:
+            code, retryable = "timeout", True
+            logger.warning("job %s (%s) timed out", job.id, job.kind)
         except JobError as error:
             code, retryable = error.code, error.retryable
             logger.warning("job %s (%s) failed: %s", job.id, job.kind, code)
@@ -137,7 +147,7 @@ class Worker:
     # Waking, housekeeping and liveness --------------------------------------------
 
     async def _sleep(self, stop: asyncio.Event, seconds: float) -> None:
-        """Until a notification, a stop, or `seconds`, whichever is first."""
+        """Until a notification, a stop, or `seconds`, whichever is first. For the job loops."""
         waiting = {asyncio.ensure_future(self._wake.wait()), asyncio.ensure_future(stop.wait())}
         _, pending = await asyncio.wait(
             waiting, timeout=seconds, return_when=asyncio.FIRST_COMPLETED
@@ -145,6 +155,12 @@ class Worker:
         for task in pending:
             task.cancel()
         self._wake.clear()
+
+    @staticmethod
+    async def _sleep_until_stop(stop: asyncio.Event, seconds: float) -> None:
+        """Until a stop or `seconds`. Housekeeping must not wake on every enqueue."""
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=seconds)
 
     async def _listen(self, stop: asyncio.Event) -> None:
         """Sets the wake event on every NOTIFY. Reconnects forever; polling covers any gap."""
@@ -158,18 +174,18 @@ class Worker:
                         self._wake.set()
             except (psycopg.Error, OSError):
                 logger.warning("job listener lost its connection; polling until it returns")
-            await self._sleep(stop, RECONNECT_SECONDS)
+            await self._sleep_until_stop(stop, RECONNECT_SECONDS)
 
     async def _maintain(self, stop: asyncio.Event) -> None:
         interval = self._settings.cleanup_interval_seconds
         # Workers started together should not all clean up together.
-        await self._sleep(stop, random.uniform(1, min(30, interval)))  # noqa: S311
+        await self._sleep_until_stop(stop, random.uniform(1, min(30, interval)))  # noqa: S311
         while not stop.is_set():
             try:
                 await self._cleanup.run_once()
             except Exception:
                 logger.exception("cleanup run failed")
-            await self._sleep(stop, interval)
+            await self._sleep_until_stop(stop, interval)
 
     async def _heartbeat(self, stop: asyncio.Event) -> None:
         """Touches a file the container's health check reads."""
@@ -177,7 +193,7 @@ class Worker:
         while not stop.is_set():
             with contextlib.suppress(OSError):
                 await asyncio.to_thread(path.touch)
-            await self._sleep(stop, HEARTBEAT_SECONDS)
+            await self._sleep_until_stop(stop, HEARTBEAT_SECONDS)
 
 
 def _conninfo(settings: Settings) -> str:

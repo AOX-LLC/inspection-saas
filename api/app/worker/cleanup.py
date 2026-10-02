@@ -6,6 +6,9 @@
 * A finished upload's staging key can be recreated by replaying its presigned
   POST until the POST expires. After that window the worker deletes any such
   object once and records that it did.
+* A photo whose job failed without the worker getting to say so (a job failed
+  by the claim's sweep, or a database outage at the wrong moment) is marked
+  failed, so a project's progress can finish.
 * Sessions that can never resolve again are deleted through `auth.purge_sessions`;
   the worker has no access to the sessions table itself.
 
@@ -40,7 +43,7 @@ _CANDIDATES = text("SELECT org_id, file_id FROM queue.abandoned_uploads(:age, :l
 _REMOVE_PENDING = text(
     """
     DELETE FROM files
-    WHERE id = :file_id AND org_id = :org_id AND status = 'pending'
+    WHERE id = :file_id AND org_id = :org_id AND status IN ('pending', 'completing')
       AND created_at < now() - make_interval(secs => :age)
     RETURNING project_id
     """
@@ -55,6 +58,11 @@ _SWEEPABLE = text(
 _MARK_SWEPT = text(
     "UPDATE files SET staging_swept_at = now() WHERE id = :file_id AND org_id = :org_id"
 )
+_STUCK_PHOTOS = text("SELECT org_id, photo_id FROM queue.stuck_photos(:limit)")
+_FAIL_PHOTO = text(
+    "UPDATE photos SET status = 'failed', error = 'worker_lost', updated_at = now() "
+    "WHERE id = :photo_id AND org_id = :org_id AND status IN ('queued', 'processing')"
+)
 _PURGE_SESSIONS = text("SELECT auth.purge_sessions(:grace, :limit)")
 
 
@@ -63,6 +71,7 @@ class CleanupReport:
     uploads_removed: int = 0
     staging_swept: int = 0
     sessions_purged: int = 0
+    photos_failed: int = 0
 
 
 class Cleanup:
@@ -80,8 +89,9 @@ class Cleanup:
 
     async def run_once(self) -> CleanupReport:
         removed, swept = await self._uploads()
+        failed = await self._stuck_photos()
         purged = await self._sessions()
-        return CleanupReport(removed, swept, purged)
+        return CleanupReport(removed, swept, purged, failed)
 
     async def _uploads(self) -> tuple[int, int]:
         age = self._settings.abandoned_upload_seconds
@@ -140,6 +150,21 @@ class Cleanup:
     async def _delete_objects(self, *keys: str) -> None:
         for key in keys:
             await asyncio.to_thread(self._store.delete, key)
+
+    async def _stuck_photos(self) -> int:
+        async with self._engine.begin() as connection:
+            stuck = (await connection.execute(_STUCK_PHOTOS, {"limit": BATCH})).all()
+        failed = 0
+        for org_id, photo_id in stuck:
+            try:
+                async with tenant_transaction(self._factory, org_id=org_id, user_id=None) as s:
+                    result = await s.execute(_FAIL_PHOTO, {"photo_id": photo_id, "org_id": org_id})
+                failed += result.rowcount
+            except SQLAlchemyError:
+                logger.exception("could not fail stuck photo %s", photo_id)
+        if failed:
+            logger.warning("cleanup: marked %d photos failed because their job had failed", failed)
+        return failed
 
     async def _sessions(self) -> int:
         grace = self._settings.session_purge_grace_seconds

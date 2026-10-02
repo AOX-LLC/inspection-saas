@@ -22,7 +22,7 @@ import io
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageChops, ImageOps
 
 ACCEPTED_FORMATS = ("JPEG", "PNG", "WEBP")
 EXIF_ORIENTATION = 0x0112
@@ -126,11 +126,15 @@ def open_oriented(data: bytes, *, max_pixels: int) -> Image.Image:
 def _as_rgb(image: Image.Image) -> Image.Image:
     if image.mode == "RGB":
         return image
-    if "A" in image.getbands() or "transparency" in image.info:
-        rgba = image.convert("RGBA")
-        background = Image.new("RGB", rgba.size, (255, 255, 255))
-        background.paste(rgba, mask=rgba.getchannel("A"))
-        return background
+    has_alpha_band = "A" in image.getbands()
+    if has_alpha_band or "transparency" in image.info:
+        # Flatten onto white without a full-size RGBA copy where the image already
+        # has an alpha band: the colours, then white painted back through the
+        # inverted alpha. Memory is the cost that matters here.
+        alpha = image.getchannel("A") if has_alpha_band else image.convert("RGBA").getchannel("A")
+        flattened = image.convert("RGB")
+        flattened.paste((255, 255, 255), mask=ImageChops.invert(alpha))
+        return flattened
     return image.convert("RGB")
 
 
@@ -144,6 +148,8 @@ def cut_tiles(
             region = region.resize(
                 (spec.width, spec.height), Image.Resampling.LANCZOS, reducing_gap=3.0
             )
+        # crop and resize copy the original's `info`, which can hold a JPEG comment.
+        region.info = {}
         buffer = io.BytesIO()
         region.save(buffer, format="JPEG", quality=quality)
         yield spec, buffer.getvalue()
