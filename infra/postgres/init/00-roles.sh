@@ -6,6 +6,12 @@
 #                     Tenant tables FORCE row-level security, so it is bound too.
 #   inspection_app    what the API connects as. Owns nothing, cannot bypass RLS,
 #                     and gets DML grants only (set up by the first migration).
+#   inspection_auth   NOLOGIN, BYPASSRLS. Owns only the SECURITY DEFINER functions
+#                     in schema `auth`, which must read sessions and credentials
+#                     before any tenant context exists. Forced RLS binds the owner,
+#                     so these functions cannot run as inspection_owner. Nobody
+#                     can log in as this role; inspection_owner may SET ROLE to it
+#                     (not inherit it) so migrations can create the functions as it.
 #
 # `inspection` holds the seeded demo data; `inspection_test` is the test suite's,
 # so tests never touch seeded rows.
@@ -27,6 +33,10 @@ CREATE ROLE inspection_app
     LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
     PASSWORD :'app_password';
 
+CREATE ROLE inspection_auth
+    NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;
+GRANT inspection_auth TO inspection_owner WITH INHERIT FALSE, SET TRUE;
+
 -- A request that leaves a transaction open must not hold locks or a pooled
 -- connection forever.
 ALTER ROLE inspection_app SET idle_in_transaction_session_timeout = '30s';
@@ -43,7 +53,7 @@ GRANT CONNECT ON DATABASE $database TO inspection_owner, inspection_app;
 
 -- PUBLIC keeps no rights in the schema; the app may resolve names but not create.
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
-GRANT USAGE ON SCHEMA public TO inspection_app;
+GRANT USAGE ON SCHEMA public TO inspection_app, inspection_auth;
 
 -- Alembic's version table lives apart from app tables. The app has no access.
 CREATE SCHEMA migrations AUTHORIZATION inspection_owner;

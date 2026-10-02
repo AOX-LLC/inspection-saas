@@ -10,8 +10,16 @@ import pytest
 
 APP_ROLE = "inspection_app"
 OWNER_ROLE = "inspection_owner"
+AUTH_ROLE = "inspection_auth"
 
-# Global reference data (not tenant-owned) goes here, read-only for the app.
+# Who may own SECURITY DEFINER functions, by schema. They run with the owner's
+# rights, so the owner is a decision, not a default: a new definer function
+# fails the ownership check until its schema is listed here on purpose.
+DEFINER_OWNER_BY_SCHEMA = {"auth": AUTH_ROLE}
+
+# Global reference data (not tenant-owned) goes here, read-only for the app: a
+# table on this list must not grant the app INSERT, UPDATE or DELETE, because
+# default privileges hand a new table all three and RLS no longer limits it.
 # Every other table must force row-level security.
 GLOBAL_TABLES: frozenset[str] = frozenset()
 
@@ -28,6 +36,7 @@ EXPECTED_APP_PRIVILEGES = {
     "files": DML,
     "audit_events": {"SELECT", "INSERT"},
     "sessions": set(),
+    "credentials": set(),
 }
 
 # What `org_id = (SELECT app.org_id())` reads back as from the catalog.
@@ -103,6 +112,97 @@ def unsafe_security_definer_functions(connection: psycopg.Connection) -> dict[st
             reasons.append("PUBLIC has EXECUTE")
         if reasons:
             problems[name] = reasons
+    return problems
+
+
+def definer_functions(connection: psycopg.Connection) -> list[tuple[str, str, str, set[str]]]:
+    """Every SECURITY DEFINER function: (signature, schema, owner, EXECUTE grantees).
+
+    Grantees exclude the owner, who always holds EXECUTE; PUBLIC appears as 'PUBLIC'.
+    """
+    rows = connection.execute(
+        f"""
+        SELECT
+            p.oid::regprocedure::text,
+            n.nspname,
+            owner.rolname,
+            coalesce(
+                array_agg(DISTINCT coalesce(grantee.rolname, 'PUBLIC'))
+                    FILTER (WHERE acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner),
+                '{{}}'
+            )
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        JOIN pg_roles owner ON owner.oid = p.proowner
+        LEFT JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl ON true
+        LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+        WHERE p.prosecdef
+          AND {USER_SCHEMAS}
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+          )
+        GROUP BY p.oid, n.nspname, owner.rolname
+        """
+    ).fetchall()
+    return [(name, schema, owner, set(grantees)) for name, schema, owner, grantees in rows]
+
+
+def definer_functions_with_wrong_owner(connection: psycopg.Connection) -> dict[str, str]:
+    """Definer functions not owned by the role their schema is approved for.
+
+    The approved owner must also be unable to log in and not a superuser, so a
+    definer function can never run with a login role's or superuser's rights.
+    """
+    problems = {}
+    for name, schema, owner, _ in definer_functions(connection):
+        if DEFINER_OWNER_BY_SCHEMA.get(schema) != owner:
+            problems[name] = f"owned by {owner}"
+            continue
+        can_login, is_super = connection.execute(
+            "SELECT rolcanlogin, rolsuper FROM pg_roles WHERE rolname = %s", (owner,)
+        ).fetchone()
+        if can_login or is_super:
+            problems[name] = f"{owner} can log in or is a superuser"
+    return problems
+
+
+def definer_functions_with_unexpected_execute(connection: psycopg.Connection) -> dict[str, set]:
+    """Definer functions whose EXECUTE grantees (besides the owner) are not exactly the app."""
+    return {
+        name: grantees
+        for name, _, _, grantees in definer_functions(connection)
+        if grantees != {APP_ROLE}
+    }
+
+
+WRITE_PRIVILEGES = ("INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
+
+
+def global_tables_with_write_grants(
+    connection: psycopg.Connection, tables: frozenset[str] | set[str]
+) -> dict[str, set[str]]:
+    """Tables the app can write to, from a set that must be read-only for it.
+
+    Covers table-level grants and column-level INSERT or UPDATE grants.
+    """
+    problems: dict[str, set[str]] = {}
+    for table in tables:
+        granted = {
+            privilege
+            for privilege in WRITE_PRIVILEGES
+            if connection.execute(
+                "SELECT has_table_privilege(%s, %s, %s)", (APP_ROLE, table, privilege)
+            ).fetchone()[0]
+        }
+        for privilege in ("INSERT", "UPDATE"):
+            column_grant = connection.execute(
+                "SELECT has_any_column_privilege(%s, %s, %s)", (APP_ROLE, table, privilege)
+            ).fetchone()[0]
+            if column_grant:
+                granted.add(privilege)
+        if granted:
+            problems[table] = granted
     return problems
 
 
@@ -254,10 +354,105 @@ def test_role_has_no_elevated_attributes(app_conn, role):
     assert row == (False, False, False, False, False)
 
 
-@pytest.mark.parametrize("role", [APP_ROLE, OWNER_ROLE])
-def test_role_inherits_no_other_role(app_conn, role):
+def test_auth_role_can_bypass_rls_but_nothing_else(app_conn):
+    row = app_conn.execute(
+        """
+        SELECT rolsuper, rolbypassrls, rolcreaterole, rolcreatedb, rolreplication, rolcanlogin
+        FROM pg_roles WHERE rolname = %s
+        """,
+        (AUTH_ROLE,),
+    ).fetchone()
+    assert row == (False, True, False, False, False, False)
+
+
+def test_app_role_inherits_no_other_role(app_conn):
     count = app_conn.execute(
-        "SELECT count(*) FROM pg_auth_members WHERE member = %s::regrole", (role,)
+        "SELECT count(*) FROM pg_auth_members WHERE member = %s::regrole", (APP_ROLE,)
+    ).fetchone()[0]
+    assert count == 0
+
+
+def test_owner_may_set_role_to_auth_but_does_not_inherit_it(app_conn):
+    """The owner's only membership is the auth role, usable by SET ROLE and not inherited."""
+    memberships = app_conn.execute(
+        """
+        SELECT roleid::regrole::text, inherit_option, set_option, admin_option
+        FROM pg_auth_members WHERE member = %s::regrole
+        """,
+        (OWNER_ROLE,),
+    ).fetchall()
+    assert memberships == [(AUTH_ROLE, False, True, False)]
+
+
+def test_nobody_else_is_a_member_of_the_auth_role(app_conn):
+    members = {
+        row[0]
+        for row in app_conn.execute(
+            "SELECT member::regrole::text FROM pg_auth_members WHERE roleid = %s::regrole",
+            (AUTH_ROLE,),
+        ).fetchall()
+    }
+    assert members == {OWNER_ROLE}
+
+
+def test_auth_role_owns_only_the_auth_functions(app_conn):
+    """Everything the BYPASSRLS role owns is a function in schema auth, and all of them are."""
+    owned = app_conn.execute(
+        """
+        SELECT d.classid::regclass::text, d.objid
+        FROM pg_shdepend d
+        WHERE d.refobjid = %s::regrole AND d.deptype = 'o'
+          AND d.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+        """,
+        (AUTH_ROLE,),
+    ).fetchall()
+    assert owned, "the auth role owns nothing; the functions are missing"
+    assert {classid for classid, _ in owned} == {"pg_proc"}
+    owned_functions = {objid for _, objid in owned}
+    in_auth_schema = {
+        row[0]
+        for row in app_conn.execute(
+            """
+            SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'auth'
+            """
+        ).fetchall()
+    }
+    assert owned_functions == in_auth_schema
+    owned_databases = app_conn.execute(
+        "SELECT count(*) FROM pg_database WHERE datdba = %s::regrole", (AUTH_ROLE,)
+    ).fetchone()[0]
+    assert owned_databases == 0
+
+
+def test_auth_role_holds_only_the_grants_it_needs(app_conn):
+    rows = app_conn.execute(
+        """
+        SELECT c.relname, acl.privilege_type
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        CROSS JOIN LATERAL aclexplode(c.relacl) acl
+        WHERE acl.grantee = %s::regrole AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+        """,
+        (AUTH_ROLE,),
+    ).fetchall()
+    granted: dict[str, set[str]] = {}
+    for table, privilege in rows:
+        granted.setdefault(table, set()).add(privilege)
+    assert granted == {
+        "users": {"SELECT"},
+        "credentials": {"SELECT", "INSERT", "UPDATE"},
+        "sessions": {"SELECT", "INSERT", "UPDATE"},
+    }
+
+
+def test_owner_role_inherits_nothing(app_conn):
+    count = app_conn.execute(
+        """
+        SELECT count(*) FROM pg_auth_members WHERE member = %s::regrole AND inherit_option
+        """,
+        (OWNER_ROLE,),
     ).fetchone()[0]
     assert count == 0
 
@@ -322,8 +517,28 @@ def test_rls_check_catches_an_unprotected_table(owner_conn):
 
 
 def test_global_tables_are_read_only_for_the_app(app_conn):
-    for table in GLOBAL_TABLES:
-        assert app_privileges(app_conn, table) <= {"SELECT"}, table
+    assert global_tables_with_write_grants(app_conn, GLOBAL_TABLES) == {}
+
+
+def test_global_table_check_catches_write_grants(owner_conn):
+    # A new table inherits DML for the app from default privileges, so a global
+    # table that forgets to revoke it is open for writing.
+    owner_conn.execute(
+        f"""
+        CREATE TABLE public.global_open_probe (id int, note text);
+        CREATE TABLE public.global_closed_probe (id int, note text);
+        REVOKE INSERT, UPDATE, DELETE ON public.global_closed_probe FROM {APP_ROLE};
+        CREATE TABLE public.global_column_probe (id int, note text);
+        REVOKE INSERT, UPDATE, DELETE ON public.global_column_probe FROM {APP_ROLE};
+        GRANT UPDATE (note) ON public.global_column_probe TO {APP_ROLE};
+        """
+    )
+    probes = {"global_open_probe", "global_closed_probe", "global_column_probe"}
+
+    assert global_tables_with_write_grants(owner_conn, probes) == {
+        "global_open_probe": {"INSERT", "UPDATE", "DELETE"},
+        "global_column_probe": {"UPDATE"},
+    }
 
 
 def test_app_privileges_are_exactly_as_designed(app_conn):
@@ -423,6 +638,71 @@ def test_definer_check_catches_an_unsafe_function(owner_conn):
     assert unsafe_security_definer_functions(owner_conn) == {
         "unsafe_probe()": ["search_path not pinned", "PUBLIC has EXECUTE"],
     }
+
+
+def test_definer_functions_exist(app_conn):
+    # Guards the checks below against passing on an empty set.
+    names = {name for name, *_ in definer_functions(app_conn)}
+    assert names == {
+        "auth.verify_login(text)",
+        "auth.create_session(uuid,bytea,integer)",
+        "auth.resolve_session(bytea,integer)",
+        "auth.revoke_session(bytea)",
+    }
+
+
+def test_definer_functions_are_owned_by_the_auth_role(app_conn):
+    assert definer_functions_with_wrong_owner(app_conn) == {}
+
+
+def test_definer_functions_are_executable_by_the_app_alone(app_conn):
+    assert definer_functions_with_unexpected_execute(app_conn) == {}
+
+
+def test_definer_owner_check_catches_the_wrong_owner(owner_conn):
+    # Created as the table owner, which is exactly what must not happen.
+    owner_conn.execute("GRANT CREATE ON SCHEMA auth TO inspection_owner")
+    owner_conn.execute("CREATE SCHEMA probe_schema")
+    owner_conn.execute(
+        """
+        CREATE FUNCTION probe_schema.unlisted_schema() RETURNS int
+            LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $$ SELECT 1 $$
+        """
+    )
+    owner_conn.execute(
+        """
+        CREATE FUNCTION auth.wrong_owner() RETURNS int
+            LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $$ SELECT 1 $$
+        """
+    )
+
+    assert definer_functions_with_wrong_owner(owner_conn) == {
+        "probe_schema.unlisted_schema()": "owned by inspection_owner",
+        "auth.wrong_owner()": "owned by inspection_owner",
+    }
+
+
+def test_definer_execute_check_catches_extra_grantees(owner_conn):
+    owner_conn.execute("SET LOCAL ROLE inspection_auth")
+    owner_conn.execute("GRANT EXECUTE ON FUNCTION auth.revoke_session(bytea) TO inspection_owner")
+    owner_conn.execute("RESET ROLE")
+    owner_conn.execute("SET LOCAL ROLE inspection_auth")
+    owner_conn.execute("GRANT EXECUTE ON FUNCTION auth.verify_login(text) TO PUBLIC")
+    owner_conn.execute("RESET ROLE")
+
+    assert definer_functions_with_unexpected_execute(owner_conn) == {
+        "auth.revoke_session(bytea)": {APP_ROLE, OWNER_ROLE},
+        "auth.verify_login(text)": {APP_ROLE, "PUBLIC"},
+    }
+
+
+def test_owner_cannot_run_the_auth_functions(owner_conn):
+    # The functions exist for the app role alone; the owner is bound by RLS and
+    # must not reach sessions or credentials through them either.
+    with pytest.raises(
+        psycopg.errors.InsufficientPrivilege, match="permission denied for function"
+    ):
+        owner_conn.execute("SELECT * FROM auth.verify_login('x@y.example')")
 
 
 def test_context_accessors_run_as_the_caller(app_conn):
