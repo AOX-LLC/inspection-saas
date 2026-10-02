@@ -159,7 +159,8 @@ def make_thumbnail(image: Image.Image, *, size: int, quality: int) -> bytes:
     """The whole photo fitted inside `size` pixels, as JPEG. Never enlarges, carries no metadata."""
     scale = min(1.0, size / max(image.size))
     target = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
-    # resize builds only the small result; the reducing gap lets a JPEG decode at reduced size.
+    # resize builds only the small result. The image is already fully decoded; the reducing
+    # gap only makes the resize itself faster (a coarse reduction first, then the filter).
     small = image.resize(target, Image.Resampling.LANCZOS, reducing_gap=3.0)
     small.info = {}
     buffer = io.BytesIO()

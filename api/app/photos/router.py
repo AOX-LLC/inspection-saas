@@ -5,6 +5,7 @@ a short-lived signed URL for its thumbnail; no route here ever signs an original
 Progress counts a project's photos by processing status.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Annotated
@@ -107,6 +108,11 @@ async def list_photos(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
         rows = (await session.execute(_LIST_FIRST if after is None else _LIST_AFTER, params)).all()
     ttl = get_settings().thumbnail_ttl_seconds
+    # Signing is CPU work, a fraction of a millisecond each; a page of 100 would hold the
+    # event loop for tens of milliseconds, so it runs in a thread.
+    urls = await asyncio.to_thread(
+        lambda: [_thumbnail_url(store, row, access.org_id, ttl) for row in rows[:limit]]
+    )
     return PhotoPage(
         items=[
             PhotoOut(
@@ -117,10 +123,10 @@ async def list_photos(
                 width=row.width,
                 height=row.height,
                 error=row.error,
-                thumbnail_url=_thumbnail_url(store, row, access.org_id, ttl),
+                thumbnail_url=url,
                 created_at=row.created_at,
             )
-            for row in rows[:limit]
+            for row, url in zip(rows, urls, strict=False)
         ],
         next_cursor=next_cursor(rows, limit),
     )
