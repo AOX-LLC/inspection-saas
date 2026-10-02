@@ -119,6 +119,8 @@ services:
     command: ["python", "-m", "app.storage.init"]
     environment:
       APP_ENV: demo
+      # The object store's CORS allows this origin and no other.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://127.0.0.1:4700}
     volumes:
       - secrets:/run/inspection-secrets:ro
     depends_on:
@@ -155,6 +157,11 @@ services:
       MODEL_MODE: ${MODEL_MODE:-mock}
       # The address a browser on this machine reaches the object store at.
       S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://127.0.0.1:4703}
+      # The web app's origin: the only one allowed to make state-changing requests.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://127.0.0.1:4700}
+      # The web service forwards each client's address in X-Forwarded-For. It is
+      # believed from this service only; a request straight to this port is not.
+      TRUSTED_PROXIES: web
     volumes:
       - secrets:/run/inspection-secrets:ro
     ports:
@@ -218,6 +225,38 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # The web app: a production Next.js build, built inside the image. It forwards
+  # /api/* to the API so the session cookie stays same-origin; it holds no business
+  # logic. Photo bytes never pass through it: the browser sends them to the object store.
+  web:
+    mem_limit: 256m
+    <<: *hardening
+    build:
+      context: ./web
+      args:
+        API_ORIGIN: http://api:8000
+    image: inspection-saas-web:local
+    environment:
+      # The object store's address as the browser reaches it, for the page's
+      # Content-Security-Policy. Read when a page is served, not at build time.
+      S3_PUBLIC_ORIGIN: ${S3_PUBLIC_ENDPOINT:-http://127.0.0.1:4703}
+      # --import: put the connecting address on X-Forwarded-For before Next.js forwards
+      # a request, so the API is never handed an address the client chose (see
+      # web/server/forwarded-for.mjs). The heap is capped at about half the container's
+      # limit, so it cannot be what the limit kills first.
+      NODE_OPTIONS: --import /app/server/preload.mjs --max-old-space-size=160
+    ports:
+      - "127.0.0.1:4700:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 5s
 
   test:
     mem_limit: 512m
