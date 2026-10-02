@@ -4,7 +4,9 @@ Upload is three steps. `POST` creates a pending row and returns a presigned
 POST whose policy pins a staging key, the declared content type and the
 declared size. The client uploads straight to the object store. `complete`
 checks the staged object's size and magic bytes, copies it server-side to the
-final key, checks the copy again, and only then marks the row ready. The
+final key, checks the copy again, and only then marks the row ready. It claims
+the row first (pending to completing, atomically), so two concurrent
+completions cannot both copy. The
 presigned POST never targets the final key, so a finished upload cannot be
 overwritten inside the POST's expiry window.
 Download signs a short-lived GET that forces the content type stored in the
@@ -22,6 +24,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Row, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import audit
@@ -40,9 +43,17 @@ router = APIRouter(prefix="/orgs/{org_id}/projects/{project_id}/files", tags=["f
 MAX_PAGE_SIZE = 100
 # Pending uploads an org may hold at once; bounds what abandoned uploads can cost.
 MAX_PENDING_UPLOADS = 100
+# Photos an org may have waiting or running at once. Jobs are served first come
+# first served across orgs, so this bounds how long one org can keep the others waiting.
+MAX_UNPROCESSED_PHOTOS = 2000
 
 _PROJECT_EXISTS = text("SELECT 1 FROM projects WHERE id = :project_id AND org_id = :org_id")
-_PENDING_COUNT = text("SELECT count(*) FROM files WHERE org_id = :org_id AND status = 'pending'")
+_PENDING_COUNT = text(
+    "SELECT count(*) FROM files WHERE org_id = :org_id AND status IN ('pending', 'completing')"
+)
+_UNPROCESSED_COUNT = text(
+    "SELECT count(*) FROM photos WHERE org_id = :org_id AND status IN ('queued', 'processing')"
+)
 _LIST = text(
     """
     SELECT id, content_type, size_bytes, status, original_filename, created_at
@@ -65,10 +76,25 @@ _GET = text(
     FROM files WHERE id = :file_id AND project_id = :project_id AND org_id = :org_id
     """
 )
+_CLAIM = text(
+    """
+    UPDATE files SET status = 'completing'
+    WHERE id = :file_id AND project_id = :project_id AND org_id = :org_id AND status = 'pending'
+    RETURNING object_key, content_type, size_bytes
+    """
+)
+_RELEASE = text(
+    """
+    UPDATE files SET status = 'pending'
+    WHERE id = :file_id AND project_id = :project_id AND org_id = :org_id
+      AND status = 'completing'
+    """
+)
 _FINISH = text(
     """
     UPDATE files SET status = :status, size_bytes = :size_bytes
-    WHERE id = :file_id AND project_id = :project_id AND org_id = :org_id AND status = 'pending'
+    WHERE id = :file_id AND project_id = :project_id AND org_id = :org_id
+      AND status = 'completing'
     RETURNING id, content_type, size_bytes, status, original_filename, created_at
     """
 )
@@ -192,11 +218,18 @@ async def create_upload(
     staging = staging_key(access.org_id, project_id, file_id)
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
         await _require_project(session, access.org_id, project_id)
-        pending = (await session.execute(_PENDING_COUNT, {"org_id": access.org_id})).scalar_one()
+        org = {"org_id": access.org_id}
+        pending = (await session.execute(_PENDING_COUNT, org)).scalar_one()
         if pending >= MAX_PENDING_UPLOADS:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many unfinished uploads. Complete or wait for them to expire.",
+            )
+        waiting = (await session.execute(_UNPROCESSED_COUNT, org)).scalar_one()
+        if waiting >= MAX_UNPROCESSED_PHOTOS:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many photos are waiting to be processed. Try again shortly.",
             )
         await session.execute(
             _INSERT,
@@ -238,16 +271,38 @@ async def complete_upload(
     factory: SessionFactoryDep,
     store: ObjectStoreDep,
 ) -> FileOut:
+    ids = {"file_id": file_id, "project_id": project_id, "org_id": access.org_id}
+    # Claim the row before touching the store. Only one caller can move it from
+    # pending to completing, so a second, concurrent completion cannot copy over
+    # an object the first has already checked and published.
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
-        row = (
-            await session.execute(
-                _GET, {"file_id": file_id, "project_id": project_id, "org_id": access.org_id}
-            )
-        ).first()
+        row = (await session.execute(_CLAIM, ids)).first()
+        existing = None if row else (await session.execute(_GET, ids)).first()
     if row is None:
-        raise _not_found()
-    if row.status != "pending":
+        if existing is None:
+            raise _not_found()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Upload already finished")
+    try:
+        return await _finish_upload(access, factory, store, ids, row)
+    except BaseException:
+        # Nothing was published, so the upload can be completed again.
+        await _release(factory, access, ids)
+        raise
+
+
+async def _release(factory, access, ids: dict) -> None:
+    try:
+        async with tenant_transaction(
+            factory, org_id=access.org_id, user_id=access.user_id
+        ) as session:
+            await session.execute(_RELEASE, ids)
+    except SQLAlchemyError:
+        # Left completing; the worker's cleanup removes it if it is never finished.
+        logger.exception("could not release upload %s", ids["file_id"])
+
+
+async def _finish_upload(access, factory, store, ids: dict, row: Row) -> FileOut:
+    file_id, project_id = ids["file_id"], ids["project_id"]
     try:
         assert_key_in_org(row.object_key, access.org_id)
     except ValueError:
@@ -266,13 +321,7 @@ async def complete_upload(
         finished = (
             await session.execute(
                 _FINISH,
-                {
-                    "file_id": file_id,
-                    "project_id": project_id,
-                    "org_id": access.org_id,
-                    "status": "ready" if accepted else "failed",
-                    "size_bytes": info.size_bytes,
-                },
+                {**ids, "status": "ready" if accepted else "failed", "size_bytes": info.size_bytes},
             )
         ).first()
         if finished is None:
