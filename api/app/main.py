@@ -1,4 +1,4 @@
-"""FastAPI application. Phase 1a serves only the health check."""
+"""FastAPI application: health and auth."""
 
 import logging
 from collections.abc import AsyncGenerator
@@ -9,16 +9,25 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.auth.ratelimit import LoginRateLimiter
+from app.auth.router import router as auth_router
 from app.config import AppEnv, get_settings
-from app.db.engine import create_engine
+from app.db.engine import create_engine, create_session_factory
+from app.http_security import protect
+from app.storage.s3 import ObjectStore
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    engine = create_engine(get_settings().app_database_url())
+    settings = get_settings()
+    engine = create_engine(settings.app_database_url())
     app.state.engine = engine
+    app.state.session_factory = create_session_factory(engine)
+    app.state.object_store = ObjectStore(settings)
+    # In memory: correct for one API process. See app/auth/ratelimit.py.
+    app.state.login_limiter = LoginRateLimiter()
     try:
         yield
     finally:
@@ -34,7 +43,9 @@ def create_app() -> FastAPI:
         redoc_url=None,
         openapi_url=None if is_production else "/openapi.json",
     )
+    app.middleware("http")(protect)
     app.add_api_route("/health", health, methods=["GET"], include_in_schema=False)
+    app.include_router(auth_router)
     return app
 
 

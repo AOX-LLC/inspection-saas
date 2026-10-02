@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     db_owner_user: str = "inspection_owner"
     db_owner_password_file: Path = Path("/run/inspection-secrets/owner/owner_password")
 
+    # Sessions: the idle timer resets on use, the absolute limit never does.
+    session_idle_seconds: int = 12 * 60 * 60
+    session_absolute_seconds: int = 7 * 24 * 60 * 60
+    # None means Secure outside demo and test, where plain HTTP on localhost is normal.
+    cookie_secure: bool | None = None
     # Browser origins allowed to make state-changing requests. Comma-separated.
     allowed_origins: str = "http://127.0.0.1:4700,http://localhost:4700"
 
@@ -57,6 +62,12 @@ class Settings(BaseSettings):
     @property
     def origins(self) -> frozenset[str]:
         return frozenset(o.strip() for o in self.allowed_origins.split(",") if o.strip())
+
+    @property
+    def cookie_is_secure(self) -> bool:
+        if self.cookie_secure is not None:
+            return self.cookie_secure
+        return self.app_env is AppEnv.PRODUCTION
 
     def app_database_url(self) -> URL:
         return self._database_url(self.db_app_user, self.db_app_password_file)
