@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     # memory-heavy step, and the container has a memory limit.
     worker_concurrency: int = Field(default=1, ge=1, le=8)
     # How long a claimed job stays locked before another worker may take it.
-    job_lock_seconds: int = Field(default=300, ge=10)
+    job_lock_seconds: int = Field(default=300, ge=10, le=3600)
     # The wait before a failed job's second attempt; it doubles each attempt.
     job_backoff_seconds: int = Field(default=5, ge=1)
     # The fallback when no NOTIFY arrives.

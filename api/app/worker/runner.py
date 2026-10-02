@@ -15,7 +15,7 @@ import os
 import random
 import secrets
 import socket
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from pathlib import Path
 from typing import Protocol
 
@@ -117,7 +117,8 @@ class Worker:
             # A hard stop at the lock's length. The thread doing a pathological
             # decode cannot be interrupted, but the loop gives up on it and the
             # job is released for another attempt rather than held forever.
-            async with asyncio.timeout(self._settings.job_lock_seconds):
+            # A margin inside the lock, so this worker gives up before another may claim.
+            async with asyncio.timeout(self._settings.job_lock_seconds * 0.9):
                 await handler.run(job)
         except TimeoutError:
             code, retryable = "timeout", True
@@ -136,7 +137,7 @@ class Worker:
         if status == "failed":
             await handler.on_failed(job, code)
 
-    async def _settle(self, outcome, job: ClaimedJob):
+    async def _settle(self, outcome: Awaitable, job: ClaimedJob) -> object:
         """Awaits a queue call. If the database is down the lock lapses and the job is retried."""
         try:
             return await outcome

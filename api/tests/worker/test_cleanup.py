@@ -335,3 +335,29 @@ async def test_a_job_that_kills_its_worker_ends_with_a_failed_photo_after_cleanu
     await cleanup.run_once()
 
     assert photo_state(photo)[0] == "failed"
+
+
+async def test_a_rejected_upload_whose_bytes_were_left_behind_loses_them(cleanup, org, store):
+    file_id = add_file(org, store, status="failed", age=2 * HOUR, final=True)
+
+    await cleanup.run_once()
+
+    assert not exists(store, original_key(org.id, org.project_id, file_id))
+    assert not exists(store, staging_key(org.id, org.project_id, file_id))
+
+
+async def test_one_failing_step_does_not_stop_the_others(cleanup, org, store, monkeypatch, user_id):
+    from sqlalchemy.exc import OperationalError
+
+    async def broken(self):
+        raise OperationalError("SELECT 1", {}, Exception("statement timeout"))
+
+    monkeypatch.setattr(type(cleanup), "_stuck_photos", broken)
+    file_id = add_file(org, store, status="pending", age=2 * HOUR)
+    dead = add_session(user_id, expired_for=3 * 24 * HOUR)
+
+    report = await cleanup.run_once()
+
+    assert (report.uploads_removed, report.photos_failed) == (1, 0)
+    assert file_row(org, file_id) is None
+    assert not session_exists(dead)

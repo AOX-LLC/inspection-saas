@@ -249,3 +249,32 @@ async def test_housekeeping_does_not_run_on_every_enqueue(running, org, store, m
 
     assert len(runs) == 1
     await run.shutdown()
+
+
+async def test_a_timed_out_decode_keeps_its_slot_until_its_thread_really_ends(
+    running, org, store, monkeypatch
+):
+    """The loop gives up on a slow decode, but must not start a second one beside it."""
+    import threading
+
+    active, peak, started = [0], [0], []
+    guard = threading.Lock()
+
+    def slow_tile(data, **kwargs):
+        with guard:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+            started.append(1)
+        time.sleep(2.5)  # longer than the job's lock
+        with guard:
+            active[0] -= 1
+        return 10, 10, []
+
+    monkeypatch.setattr(tile_photo, "tile_image", slow_tile)
+    add_photo(org, store, jpeg())
+    run = running(job_lock_seconds=1, worker_poll_seconds=0.2, job_backoff_seconds=1)
+
+    assert await until(lambda: len(started) >= 2, within=15)
+
+    assert peak[0] == 1
+    await run.shutdown()

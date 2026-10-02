@@ -19,6 +19,7 @@ org, like any other tenant work. Every step can be repeated.
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -50,7 +51,7 @@ _REMOVE_PENDING = text(
 )
 _SWEEPABLE = text(
     """
-    SELECT project_id FROM files
+    SELECT project_id, status FROM files
     WHERE id = :file_id AND org_id = :org_id AND status IN ('ready', 'failed')
       AND staging_swept_at IS NULL AND created_at < now() - make_interval(secs => :age)
     """
@@ -88,10 +89,19 @@ class Cleanup:
         self._settings = settings
 
     async def run_once(self) -> CleanupReport:
-        removed, swept = await self._uploads()
-        failed = await self._stuck_photos()
-        purged = await self._sessions()
+        """Every step runs even if another fails: one slow query must not stop the rest."""
+        removed, swept = await self._step("uploads", self._uploads(), (0, 0))
+        failed = await self._step("stuck photos", self._stuck_photos(), 0)
+        purged = await self._step("sessions", self._sessions(), 0)
         return CleanupReport(removed, swept, purged, failed)
+
+    @staticmethod
+    async def _step(name: str, work: Awaitable, fallback):
+        try:
+            return await work
+        except (SQLAlchemyError, ClientError, BotoCoreError, OSError):
+            logger.exception("cleanup step failed: %s", name)
+            return fallback
 
     async def _uploads(self) -> tuple[int, int]:
         age = self._settings.abandoned_upload_seconds
@@ -142,7 +152,12 @@ class Cleanup:
                 return "removed"
             finished = (await session.execute(_SWEEPABLE, params)).first()
             if finished is not None:
-                await self._delete_objects(staging_key(org_id, finished.project_id, file_id))
+                keys = [staging_key(org_id, finished.project_id, file_id)]
+                if finished.status == "failed":
+                    # A rejected upload's bytes are never kept; `complete` deletes them,
+                    # and this catches a deletion that failed there.
+                    keys.append(original_key(org_id, finished.project_id, file_id))
+                await self._delete_objects(*keys)
                 await session.execute(_MARK_SWEPT, params)
                 return "swept"
         return None

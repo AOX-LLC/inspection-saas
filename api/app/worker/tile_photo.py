@@ -82,6 +82,10 @@ class TilePhoto:
         self._factory = factory
         self._store = store
         self._settings = settings
+        # A decode thread cannot be interrupted. If its job times out, the thread keeps
+        # its memory, so the slot stays taken until the thread itself returns: the next
+        # job waits instead of starting a second decode in a container sized for one.
+        self._decode_slots = asyncio.Semaphore(settings.worker_concurrency)
 
     async def run(self, job: ClaimedJob) -> None:
         photo_id = _photo_id(job)
@@ -150,8 +154,13 @@ class TilePhoto:
                 store=store_tile,
             )
 
+        await self._decode_slots.acquire()
+        thread = asyncio.ensure_future(asyncio.to_thread(work))
+        thread.add_done_callback(lambda _: self._decode_slots.release())
         try:
-            return await asyncio.to_thread(work)
+            # Shielded: cancelling this job's wait must not cancel the thread's future,
+            # whose completion is what frees the slot.
+            return await asyncio.shield(thread)
         except ImageRejected as error:
             raise JobError(error.code, retryable=False) from None
         except (ClientError, BotoCoreError):
