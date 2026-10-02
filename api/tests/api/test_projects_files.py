@@ -617,7 +617,7 @@ async def test_a_storage_failure_while_completing_leaves_the_upload_completable(
     assert done.status_code == 200
 
 
-async def test_completing_an_upload_that_was_removed_is_a_404(signed_in, world: World):
+async def test_completing_an_upload_that_does_not_exist_is_a_404(signed_in, world: World):
     client = await signed_in(world.alpha.inspector)
 
     response = await client.post(
@@ -647,3 +647,52 @@ async def test_photos_waiting_to_be_processed_are_capped_per_org(
     ok = await create_upload(other, world.beta.id, world.beta.project_id)
     cleanup.append(original_key(world.beta.id, world.beta.project_id, UUID(ok.json()["file_id"])))
     assert ok.status_code == 201
+
+
+async def test_an_upload_too_old_to_be_completed_is_refused_and_left_for_cleanup(
+    signed_in, world: World, cleanup
+):
+    client = await signed_in(world.alpha.inspector)
+    org, project = world.alpha.id, world.alpha.project_id
+    png = image_bytes("PNG")
+    start = await create_upload(client, org, project, size=len(png))
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    cleanup.append(original_key(org, project, file_id))
+    assert (await send_to_store(upload, png)).status_code in (200, 201, 204)
+    with psycopg.connect(owner_conninfo(), autocommit=True) as connection, connection.transaction():
+        set_context(connection, org_id=org)
+        connection.execute(
+            "UPDATE files SET created_at = now() - interval '2 hours' WHERE id = %s", (file_id,)
+        )
+
+    late = await client.post(f"{files_url(org, project)}/{file_id}/complete")
+
+    assert late.status_code == 409
+    assert "expired" in late.json()["detail"]
+    assert file_status(org, file_id) == "pending"  # untouched: the cleanup will remove it
+    assert ObjectStore(get_settings()).inspect(original_key(org, project, file_id)) is None
+
+
+async def test_a_storage_hiccup_after_the_commit_does_not_fail_a_finished_upload(
+    signed_in, world: World, cleanup, monkeypatch
+):
+    from botocore.exceptions import ClientError
+
+    client = await signed_in(world.alpha.inspector)
+    org, project = world.alpha.id, world.alpha.project_id
+    png = image_bytes("PNG")
+    start = await create_upload(client, org, project, size=len(png))
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    cleanup.append(original_key(org, project, file_id))
+    assert (await send_to_store(upload, png)).status_code in (200, 201, 204)
+
+    def down(self, key):
+        raise ClientError({"Error": {"Code": "503", "Message": "down"}}, "DeleteObject")
+
+    monkeypatch.setattr(ObjectStore, "delete", down)
+    done = await client.post(f"{files_url(org, project)}/{file_id}/complete")
+
+    assert done.status_code == 200
+    assert file_status(org, file_id) == "ready"

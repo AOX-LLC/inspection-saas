@@ -21,17 +21,18 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID, uuid4
 
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Row, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import audit
 from app.config import get_settings
 from app.db.tenant import tenant_transaction
 from app.deps import ObjectStoreDep, SessionFactoryDep
-from app.orgs.access import MemberAccess, WriterAccess
+from app.orgs.access import MemberAccess, OrgAccess, WriterAccess
 from app.photos.service import register_photo
 from app.storage.content_types import ALLOWED_CONTENT_TYPES, detect_content_type
 from app.storage.keys import assert_key_in_org, original_key, staging_key
@@ -46,6 +47,8 @@ MAX_PENDING_UPLOADS = 100
 # Photos an org may have waiting or running at once. Jobs are served first come
 # first served across orgs, so this bounds how long one org can keep the others waiting.
 MAX_UNPROCESSED_PHOTOS = 2000
+# How long before an upload becomes the cleanup's that it stops being completable.
+COMPLETION_MARGIN_SECONDS = 600
 
 _PROJECT_EXISTS = text("SELECT 1 FROM projects WHERE id = :project_id AND org_id = :org_id")
 _PENDING_COUNT = text(
@@ -80,6 +83,7 @@ _CLAIM = text(
     """
     UPDATE files SET status = 'completing'
     WHERE id = :file_id AND project_id = :project_id AND org_id = :org_id AND status = 'pending'
+      AND created_at > now() - make_interval(secs => :max_age)
     RETURNING object_key, content_type, size_bytes
     """
 )
@@ -272,25 +276,38 @@ async def complete_upload(
     store: ObjectStoreDep,
 ) -> FileOut:
     ids = {"file_id": file_id, "project_id": project_id, "org_id": access.org_id}
+    # An upload this old may already be the cleanup's to remove, so it can no longer be
+    # completed. The margin is longer than any completion takes: a row the cleanup can
+    # take was claimed (if at all) well before it became eligible.
+    max_age = get_settings().abandoned_upload_seconds - COMPLETION_MARGIN_SECONDS
     # Claim the row before touching the store. Only one caller can move it from
     # pending to completing, so a second, concurrent completion cannot copy over
     # an object the first has already checked and published.
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
-        row = (await session.execute(_CLAIM, ids)).first()
+        row = (await session.execute(_CLAIM, {**ids, "max_age": max_age})).first()
         existing = None if row else (await session.execute(_GET, ids)).first()
     if row is None:
         if existing is None:
             raise _not_found()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Upload already finished")
+        detail = (
+            "Upload expired; start a new one"
+            if existing.status == "pending"
+            else "Upload already finished or being completed"
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
     try:
         return await _finish_upload(access, factory, store, ids, row)
-    except BaseException:
-        # Nothing was published, so the upload can be completed again.
+    except Exception:
+        # If nothing was published (a storage error, a missing object) the row goes
+        # back to pending so the upload can be completed again. After a rejection or
+        # a commit it is no longer completing and this changes nothing. A cancelled
+        # request is not released: its copy may still be running, and the cleanup
+        # removes a row left completing.
         await _release(factory, access, ids)
         raise
 
 
-async def _release(factory, access, ids: dict) -> None:
+async def _release(factory: async_sessionmaker[AsyncSession], access: OrgAccess, ids: dict) -> None:
     try:
         async with tenant_transaction(
             factory, org_id=access.org_id, user_id=access.user_id
@@ -301,7 +318,13 @@ async def _release(factory, access, ids: dict) -> None:
         logger.exception("could not release upload %s", ids["file_id"])
 
 
-async def _finish_upload(access, factory, store, ids: dict, row: Row) -> FileOut:
+async def _finish_upload(
+    access: OrgAccess,
+    factory: async_sessionmaker[AsyncSession],
+    store: ObjectStore,
+    ids: dict,
+    row: Row,
+) -> FileOut:
     file_id, project_id = ids["file_id"], ids["project_id"]
     try:
         assert_key_in_org(row.object_key, access.org_id)
@@ -345,9 +368,15 @@ async def _finish_upload(access, factory, store, ids: dict, row: Row) -> FileOut
             )
     # The staged bytes are never kept. A leftover from a write that landed after
     # this point is removed by the worker's cleanup.
-    await asyncio.to_thread(store.delete, staging)
+    # Past the commit, a storage hiccup must not turn a finished upload into a 500.
+    # What is left behind is removed by the worker's cleanup.
+    try:
+        await asyncio.to_thread(store.delete, staging)
+        if not accepted:
+            await asyncio.to_thread(store.delete, row.object_key)
+    except (ClientError, BotoCoreError):
+        logger.exception("could not delete objects of upload %s", file_id)
     if not accepted:
-        await asyncio.to_thread(store.delete, row.object_key)
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=problem)
 
     return _file_out(finished)
