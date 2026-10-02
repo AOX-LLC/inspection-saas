@@ -26,9 +26,10 @@ any other: `org_id NOT NULL`, forced row-level security, one policy comparing
 - *Enqueue is part of the write.* The API inserts the photo and its job in the
   same transaction as the file's status change (`app/photos/service.py`). Both
   commit or neither does, so there is never a photo nobody will tile.
-- *Payloads are ids.* A CHECK on `jobs.payload` allows only an object whose
-  values are canonical UUID strings. Nothing else can be stored, so nothing
-  else can be returned by the cross-tenant claim.
+- *Payloads are ids.* A CHECK on `jobs.payload` allows only a small object (500
+  characters at most) whose keys are short snake_case names and whose values are
+  canonical UUID strings. Nothing else can be stored, so nothing else can be
+  returned by the cross-tenant claim.
 - *Wake-up.* An `AFTER INSERT` trigger sends `NOTIFY inspection_jobs` with no
   payload; it is delivered at commit. Workers `LISTEN` and also poll every few
   seconds, so a lost notification or a retry that has become due costs one poll
@@ -38,9 +39,9 @@ any other: `org_id NOT NULL`, forced row-level security, one policy comparing
   tables; the tenant-aware claim is the part that has to be ours.
 
 **Claiming is the one cross-tenant path, and it is narrow.** It follows the
-pattern of ADR 0002. Four `SECURITY DEFINER` functions in schema `queue` are
+pattern of ADR 0002. Five `SECURITY DEFINER` functions in schema `queue` are
 owned by `inspection_dispatcher`: `NOLOGIN`, `BYPASSRLS`, owning nothing else,
-holding `SELECT, UPDATE` on `jobs` and `SELECT` on `files`. Each pins
+holding `SELECT, UPDATE` on `jobs` and `SELECT` on `files` and `photos`. Each pins
 `search_path`, has `EXECUTE` revoked from PUBLIC, and is granted to
 `inspection_worker` alone.
 
@@ -48,10 +49,13 @@ holding `SELECT, UPDATE` on `jobs` and `SELECT` on `files`. Each pins
 - `jobs_complete` and `jobs_fail` act only on a job the caller still holds
   (`locked_by`), and return whether they did.
 - `abandoned_uploads` returns org and file ids of uploads to clean up.
+- `stuck_photos` returns org and photo ids of photos whose job has failed.
 
 `inspection_worker` is `NOSUPERUSER NOBYPASSRLS`, owns nothing, and has **no
 grant on `jobs`**. Its other grants are listed in migration 0004 and pinned by
-a test; it inherits nothing from the default privileges the app role gets.
+a test; it inherits nothing from the default privileges the app role gets. It
+may update only a photo's status, size, error and timestamp, and a restrictive
+policy limits its deletes on `files` to uploads that never finished.
 
 **The worker does everything else under row-level security.** After a claim it
 opens `tenant_transaction(org_id=job.org_id)` and reads and writes through the
@@ -65,7 +69,13 @@ the next claim takes it again. A failed attempt is released with exponential
 backoff (base doubling, capped at an hour). A job that is out of attempts, or
 whose error is not retryable, becomes `failed`; a lapsed lock on a job with no
 attempts left also becomes `failed`, so a file that kills its worker cannot loop
-forever. Errors stored on a job or photo are fixed codes, never messages.
+forever. That sweep happens in SQL, where the photo is out of reach, so the
+worker's housekeeping finds photos whose job has failed (`stuck_photos`) and
+marks them failed under their own org's context; a project's progress can
+therefore always finish. A handler is also given up on after `JOB_LOCK_SECONDS`
+(the thread decoding a pathological file cannot be interrupted, but the loop
+stops waiting for it and the job is retried). A lock holder's name includes a
+random part, so another worker cannot guess it. Errors stored on a job or photo are fixed codes, never messages.
 Handlers are written to be repeated; processing is at-least-once.
 
 **Tiling.**
@@ -84,18 +94,24 @@ Handlers are written to be repeated; processing is at-least-once.
 - A photo that would need more than `MAX_TILES_PER_PHOTO` tiles is refused
   before any are cut, which bounds a long thin image.
 - Tiles are JPEGs written to `.../photos/{photo_id}/tiles/{level}_{x}_{y}.jpg`
-  with none of the original's metadata (no camera, time or location).
+  with none of the original's metadata (no EXIF, so no camera, time or
+  location, and no JPEG comment). A tile row's key is bound by a CHECK to its
+  own org and photo.
 
 **Uploads go to a staging key.** The presigned POST targets
-`.../files/{id}/upload`, never the final key. `complete` checks the staged
-object's size and magic bytes, copies it server-side to `.../original` pinned to
-the etag it checked, re-checks the copy, then deletes the staged object. The
+`.../files/{id}/upload`, never the final key. `complete` first claims the
+row (`pending` to `completing`, atomically, so two concurrent completions cannot
+both copy), checks the staged object's size and magic bytes, copies it
+server-side to `.../original` pinned to the etag it checked, re-checks the copy,
+then deletes the staged object. A failure before publishing releases the row back
+to `pending`; one that is never released is removed by the cleanup like any
+abandoned upload. The
 final key is never a POST target, so a finished upload cannot be overwritten
 inside the POST's expiry window.
 
 **Housekeeping.** Every worker runs a periodic cleanup, safe to repeat:
 
-- A `pending` upload older than `ABANDONED_UPLOAD_SECONDS` (never less than 15
+- A `pending` or `completing` upload older than `ABANDONED_UPLOAD_SECONDS` (never less than 15
   minutes, past a presigned POST's lifetime) loses its row and both objects. The
   objects go first inside the transaction that deletes the row, so a storage
   failure rolls the delete back and nothing is orphaned.
@@ -138,8 +154,23 @@ back through the progress endpoint.
   The limit is a setting sized to the worker container's memory.
 - **Throughput under load, and memory with large photos at higher concurrency,
   are not measured.** The default is one job at a time.
-- Photos cannot yet be deleted, so nothing removes tiles; the erasure path for an
-  org (deleting its `orgs/{org_id}/` prefix) covers them.
+- **There is no erasure path for objects yet.** Deleting an org cascades its
+  rows, but every original and tile (up to 513 derived copies of each image)
+  stays in the bucket under `orgs/{org_id}/`. Removing that prefix is the
+  intended mechanism and is not built; it must exist before this holds personal
+  data.
+- **No fairness between orgs.** Claims are first come, first served. Each org is
+  limited to 2000 photos waiting or running, which bounds how long one org can
+  hold the others up; round-robin claiming is not built.
+- **Finished jobs are never pruned.**
+- **The API role can insert a job with any column set** (status, attempts, lock),
+  not only the three it needs, and the dispatcher can update any job column.
+  Column grants would narrow both, but the catalog tests assert that the app has
+  no column-level grants, so it is left as a known gap.
+- Peak memory while decoding a 50-megapixel photo was measured at about 415 MB
+  (RGB) and 500 MB (with an alpha channel) in the worker's 768 MB container, so
+  one job at a time fits and two do not. The worker is restarted automatically if
+  it dies, which is the only protection against an out-of-memory kill.
 
 ## Alternatives considered
 

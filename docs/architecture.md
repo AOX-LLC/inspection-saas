@@ -124,7 +124,8 @@ metadata and never reaches a key.
   a presigned POST whose policy pins a **staging** key
   (`.../files/{id}/upload`), one content type (`image/jpeg`, `image/png` or
   `image/webp`) and a size up to what the client declared, for 5 minutes. The
-  client uploads straight to the store. `POST .../files/{id}/complete` reads the
+  client uploads straight to the store. `POST .../files/{id}/complete` claims the row
+  (`pending` to `completing`, so two concurrent completions cannot both copy), reads the
   staged object's size and first bytes, checks that they match the declared
   type, copies it server-side to the final key (pinned to the etag it checked),
   checks the copy again, deletes the staged object, and marks the row `ready`.
@@ -187,9 +188,10 @@ catalog tests fail until it does.
    `MAX_TILES_PER_PHOTO`).
 5. **Progress.** `GET /orgs/{org_id}/projects/{project_id}/photos/progress`
    returns counts of the project's photos by status, to any member.
-6. **Housekeeping.** Periodically: abandoned uploads (row and staged object) are
-   removed, staging keys of finished uploads are swept, and dead sessions are
-   purged through `auth.purge_sessions`.
+6. **Housekeeping.** Periodically (on a timer, not on every enqueue):
+   abandoned uploads (row and staged object) are removed, staging keys of
+   finished uploads are swept, photos whose job failed are marked failed, and
+   dead sessions are purged through `auth.purge_sessions`.
 
 ## Model calls
 
