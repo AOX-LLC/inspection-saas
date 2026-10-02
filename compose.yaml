@@ -37,7 +37,13 @@ services:
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=peer"
     volumes:
       - pgdata:/var/lib/postgresql
-      - secrets:/run/inspection-secrets:ro
+      # Only the database's own secrets, not the whole volume.
+      - type: volume
+        source: secrets
+        target: /run/inspection-secrets/db
+        read_only: true
+        volume:
+          subpath: db
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     ports:
       - "127.0.0.1:4702:5432"

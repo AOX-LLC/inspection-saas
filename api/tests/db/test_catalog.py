@@ -485,6 +485,16 @@ def test_app_role_cannot_create_objects(app_conn):
     assert row == (False, False, False, False)
 
 
+def test_nobody_can_create_objects_in_the_auth_schema(app_conn):
+    rows = {
+        role: app_conn.execute(
+            "SELECT has_schema_privilege(%s, 'auth', 'CREATE')", (role,)
+        ).fetchone()[0]
+        for role in (APP_ROLE, AUTH_ROLE)
+    }
+    assert rows == {APP_ROLE: False, AUTH_ROLE: False}
+
+
 def test_app_role_cannot_reach_migration_history(owner_conn):
     # Asked as the owner: the app role cannot even resolve names in the schema.
     usage = owner_conn.execute(

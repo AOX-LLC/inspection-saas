@@ -129,6 +129,9 @@ GRANT EXECUTE ON FUNCTION
 TO {APP_ROLE};
 
 RESET ROLE;
+
+-- The functions exist; nothing needs to create more objects as the auth role.
+REVOKE CREATE ON SCHEMA auth FROM {AUTH_ROLE};
 """
 
 DOWNGRADE = f"""
