@@ -155,6 +155,19 @@ def cut_tiles(
         yield spec, buffer.getvalue()
 
 
+def make_thumbnail(image: Image.Image, *, size: int, quality: int) -> bytes:
+    """The whole photo fitted inside `size` pixels, as JPEG. Never enlarges, carries no metadata."""
+    scale = min(1.0, size / max(image.size))
+    target = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    # resize builds only the small result. The image is already fully decoded; the reducing
+    # gap only makes the resize itself faster (a coarse reduction first, then the filter).
+    small = image.resize(target, Image.Resampling.LANCZOS, reducing_gap=3.0)
+    small.info = {}
+    buffer = io.BytesIO()
+    small.save(buffer, format="JPEG", quality=quality)
+    return buffer.getvalue()
+
+
 def tile_image(
     data: bytes,
     *,
@@ -164,10 +177,18 @@ def tile_image(
     max_pixels: int,
     max_tiles: int,
     store: Callable[[TileSpec, bytes], None],
+    thumbnail_size: int | None = None,
+    store_thumbnail: Callable[[bytes], None] | None = None,
 ) -> tuple[int, int, list[TileSpec]]:
-    """Decode, plan and cut `data`, handing each tile to `store`. Returns (width, height, specs)."""
+    """Decode, plan and cut `data`, handing each tile to `store`. Returns (width, height, specs).
+
+    With `store_thumbnail`, one small preview of the whole photo goes to it as well,
+    from the same decode, before the tiles.
+    """
     image = open_oriented(data, max_pixels=max_pixels)
     specs = plan_tiles(*image.size, tile_size=tile_size, overlap=overlap, max_tiles=max_tiles)
+    if store_thumbnail is not None and thumbnail_size is not None:
+        store_thumbnail(make_thumbnail(image, size=thumbnail_size, quality=quality))
     for spec, jpeg in cut_tiles(image, specs, quality=quality):
         store(spec, jpeg)
     return image.size[0], image.size[1], specs

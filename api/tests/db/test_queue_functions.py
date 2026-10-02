@@ -568,6 +568,7 @@ def test_the_worker_has_only_the_column_grants_it_needs(worker_conn):
         "photos.height:UPDATE",
         "photos.error:UPDATE",
         "photos.updated_at:UPDATE",
+        "photos.thumb_key:UPDATE",
     }
 
 

@@ -8,6 +8,7 @@ instead of by filtering. Client filenames are kept as metadata and never used.
     orgs/{org_id}/projects/{project_id}/files/{file_id}/original
     orgs/{org_id}/projects/{project_id}/files/{file_id}/upload      (staging)
     orgs/{org_id}/projects/{project_id}/photos/{photo_id}/tiles/{level}_{x}_{y}.jpg
+    orgs/{org_id}/projects/{project_id}/photos/{photo_id}/thumb.jpg
 
 Uploads are written to the staging key and copied to the original key by the
 server once their content has been checked, so a presigned POST never targets
@@ -21,6 +22,7 @@ _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _ORIGINAL_KEY = re.compile(
     rf"orgs/(?P<org>{_UUID})/projects/(?P<project>{_UUID})/files/(?P<file>{_UUID})/original"
 )
+_THUMBNAIL_KEY = re.compile(rf"orgs/(?P<org>{_UUID})/projects/{_UUID}/photos/{_UUID}/thumb\.jpg")
 
 
 def _segment(value: UUID) -> str:
@@ -52,6 +54,18 @@ def tile_key(org_id: UUID, project_id: UUID, photo_id: UUID, level: int, x: int,
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"tile {name} must be a non-negative integer")
     return f"{photo_prefix(org_id, project_id, photo_id)}tiles/{level}_{x}_{y}.jpg"
+
+
+def thumbnail_key(org_id: UUID, project_id: UUID, photo_id: UUID) -> str:
+    """The one small preview of a photo, which is all a grid ever loads."""
+    return f"{photo_prefix(org_id, project_id, photo_id)}thumb.jpg"
+
+
+def assert_thumbnail_key_in_org(key: str, org_id: UUID) -> None:
+    """Raises ValueError unless `key` is a well-formed thumbnail key inside `org_id`."""
+    match = _THUMBNAIL_KEY.fullmatch(key)
+    if match is None or match["org"] != _segment(org_id):
+        raise ValueError("thumbnail key does not belong to this org")
 
 
 def assert_key_in_org(key: str, org_id: UUID) -> None:

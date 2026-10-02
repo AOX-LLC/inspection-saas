@@ -13,7 +13,7 @@ published port is bound to 127.0.0.1.
 
 | Service | Port | Status | Role |
 | --- | --- | --- | --- |
-| `api` | 4701 | Phase 1b | FastAPI, SQLAlchemy 2 (async, psycopg 3). Health, login and logout, projects, presigned file upload and download, and batch progress. |
+| `api` | 4701 | Phase 1b | FastAPI, SQLAlchemy 2 (async, psycopg 3). Health, login and logout, projects, presigned file upload and download, the photo grid's list and batch progress. |
 | `db` | 4702 | Phase 1a | Postgres 18 with pgvector. |
 | `secrets` | none | Phase 1a | One-shot. Writes random database credentials into a volume on first run. |
 | `objectstore` | 4703 | Phase 1b | Garage, an S3-compatible object store for photos and reports. The API presigns; it never proxies bytes. See [ADR 0001](adr/0001-object-store.md). |
@@ -21,7 +21,7 @@ published port is bound to 127.0.0.1.
 | `migrate` | none | Phase 1a | One-shot. Alembic migrations as the owner role. |
 | `seed` | none | Phase 1a | One-shot. Synthetic demo data and generated images; refuses to run unless `APP_ENV=demo`. |
 | `test` | none | Phase 1a | Profile `test`. Runs the isolation, API, storage and worker suites against `inspection_test` and the object store. |
-| `web` | 4700 | planned | Web front end, same-origin with the API. |
+| `web` | 4700 | Phase 2b | Next.js (TypeScript, App Router) production build, built inside its image. Rewrites `/api/*` to the API so the session cookie stays same-origin; holds no business logic. Photo bytes go from the browser straight to the object store. See [ADR 0005](adr/0005-web-tier.md). |
 | `worker` | none | Phase 2a | Same image as the API (`python -m app.worker`), run as the worker role with a 768 MB memory limit. Tiles photos from a Postgres job queue and does housekeeping. The detector, model pass, retrieval and PDFs arrive in later phases. See [ADR 0004](adr/0004-job-queue.md). |
 
 ```mermaid
@@ -35,8 +35,9 @@ flowchart LR
     api -->|operations, presigning| store
     worker[worker<br/>worker role] -->|claim, tenant work| db
     worker -->|originals, tiles| store
-    browser([client]) -->|cookie| api
-    browser -->|presigned URL| store
+    web[web<br/>Next.js] -->|forwards /api, appends client address| api
+    browser([client]) -->|pages, /api, cookie| web
+    browser -->|presigned POST and GET| store
     test[test<br/>app + owner roles] --> db
     test --> store
 ```
@@ -111,8 +112,13 @@ short:
 4. **Tenant context.** Only then does the handler open a `tenant_transaction`,
    and row-level security applies as before.
 
-State-changing requests also need an allowed `Origin` header. Login is rate
-limited per IP and per email, in memory.
+State-changing requests also need an allowed `Origin` header (the web app's own
+origin, `ALLOWED_ORIGINS`). Login is rate limited per IP and per email, in
+memory. The IP is the socket's, except for a request from a proxy listed in
+`TRUSTED_PROXIES` (the web service), whose `X-Forwarded-For` is read from the
+right; see [ADR 0002](adr/0002-auth.md) and [ADR 0005](adr/0005-web-tier.md).
+In demo mode only, `GET /auth/demo-accounts` lists the seeded accounts for the
+login page; in any other mode the route does not exist.
 
 ## Files and object storage
 
@@ -142,8 +148,14 @@ metadata and never reaches a key.
   signature binds to its host.
 - **Audit.** Every presign, completion and rejection is written to
   `audit_events` in the same transaction, without the URL.
+- **Lists.** `GET .../files` pages by keyset: an opaque `cursor` over
+  `(created_at, id)`, and `next_cursor` in the response (null on the last page),
+  served by an index on `(org_id, project_id, created_at, id)`. A malformed
+  cursor is a 422.
+- **CORS.** The object store answers cross-origin requests from the web origin
+  only, for `GET` and `POST`, with only a `content-type` request header.
 
-## Data model (Phase 2a)
+## Data model (Phase 2b)
 
 | Table | Tenant-owned | Notes |
 | --- | --- | --- |
@@ -155,7 +167,7 @@ metadata and never reaches a key.
 | `projects` | yes | |
 | `files` | yes | Object key, content type, size, status. FK `(org_id, project_id)`. |
 | `audit_events` | yes | Append-only for the app. |
-| `photos` | yes | One per uploaded image: status `queued`, `processing`, `tiled` or `failed`, and its size once decoded. FK `(org_id, file_id)` and `(org_id, project_id)`. The API inserts and reads; the worker updates. |
+| `photos` | yes | One per uploaded image: status `queued`, `processing`, `tiled` or `failed`, its size once decoded, and `thumb_key`, the key of its thumbnail (bound by a CHECK to the photo's own org, project and id). FK `(org_id, file_id)` and `(org_id, project_id)`. The API inserts and reads; the worker updates. |
 | `tiles` | yes | Where each tile sits in the oriented original (`x`, `y`, `src_width`, `src_height`), its `scale`, and its object key. Level 0 is full resolution, level 1 one overview. Written by the worker. |
 | `jobs` | yes | The queue. Payload is ids only (a CHECK). The API may insert; nothing but the `queue` functions reads or changes them. |
 
@@ -186,12 +198,36 @@ catalog tests fail until it does.
    maps back with `original = origin + tile_px / scale`. Tile size, overlap and
    limits are settings (`TILE_SIZE`, `TILE_OVERLAP`, `MAX_IMAGE_PIXELS`,
    `MAX_TILES_PER_PHOTO`).
-5. **Progress.** `GET /orgs/{org_id}/projects/{project_id}/photos/progress`
+5. **Thumbnail.** From the same decode, the worker writes one JPEG of the whole
+   oriented photo fitted inside `THUMBNAIL_SIZE` (320) pixels, with no metadata, at
+   `.../photos/{photo_id}/thumb.jpg`, before the tiles, and records its key.
+6. **Progress and the grid.** `GET /orgs/{org_id}/projects/{project_id}/photos/progress`
    returns counts of the project's photos by status, to any member.
-6. **Housekeeping.** Periodically (on a timer, not on every enqueue):
+   `GET .../photos` lists them newest first, by keyset, with the original filename,
+   status, size, a short failure code, and, for a tiled photo, a presigned GET for
+   its thumbnail (15 minutes). No route signs an original for the grid.
+7. **Housekeeping.** Periodically (on a timer, not on every enqueue):
    abandoned uploads (row and staged object) are removed, staging keys of
    finished uploads are swept, photos whose job failed are marked failed, and
    dead sessions are purged through `auth.purge_sessions`.
+
+## The web app
+
+`web/` is a Next.js production build with no business logic ([ADR 0005](adr/0005-web-tier.md)).
+Pages: sign-in, organizations, a project list, and the project page. On the project
+page a writer drops photos in, and the browser, a few files at a time:
+
+1. asks the API for a presigned POST (`POST .../files`),
+2. sends the bytes straight to the object store (XMLHttpRequest, for upload progress),
+3. calls `.../complete`, which checks the staged object and enqueues tiling,
+4. polls `.../photos/progress` until nothing is waiting, refreshing the grid as the
+   numbers move.
+
+A refusal at any step is shown against its file in plain language and, where trying
+again could help, with a retry. The grid shows a placeholder for a photo that is
+waiting, a spinner while it processes, the thumbnail when it is done and the reason
+if it failed. The Content-Security-Policy allows images and connections from the
+web origin and the object store's public origin only.
 
 ## Model calls
 
@@ -218,8 +254,18 @@ from `.env`. Phase 1a defines the setting only; nothing calls a model yet.
   dead worker's job is reclaimed, and the claim exposes only its four columns.
 - `api/tests/api/test_batch.py` uploads 50 synthetic photos through the API, runs
   a worker, and reads the counts back through the progress endpoint.
+- `api/tests/api/test_pagination.py`, `test_photo_grid.py`, `test_client_ip.py` and
+  `test_demo_accounts.py`: keyset paging, the thumbnail list and its tenancy,
+  `X-Forwarded-For` trusted only from the configured proxy, and the demo list
+  existing only in demo mode. `tests/storage/test_cors.py` checks the store's CORS.
+- `web/`: `npm test` runs unit tests (`node --test`) for the Content-Security-Policy
+  builder, the user-facing messages, the upload checks, list merging and the
+  forwarded-address rule. `scripts/web_walkthrough.py` drives the stack in a
+  headless browser: sign in, upload 10 photos, watch them finish, and fail on any
+  console error, CSP violation or image request that is not a thumbnail.
 - CI runs on every pull request and push to `main`: ruff, the full Compose
-  stack with a health check, the test suite, a smoke job (`scripts/smoke.sh`: log
+  stack with a health check, the test suite, a web job (`npm ci`, lint,
+  type-check, unit tests, `next build`), a smoke job (`scripts/smoke.sh`: log
   in, upload, wait for the worker to tile it, download, cross-org 404), and a
   gitleaks scan of the whole git history.
 - pre-commit runs gitleaks and ruff locally.

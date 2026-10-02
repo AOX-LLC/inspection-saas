@@ -133,6 +133,10 @@ def org(store: ObjectStore) -> Iterator[Org]:
     query(created.id, "DELETE FROM jobs")
     keys = [row[0] for row in query(created.id, "SELECT object_key FROM tiles")]
     keys += [row[0] for row in query(created.id, "SELECT object_key FROM files")]
+    keys += [
+        row[0]
+        for row in query(created.id, "SELECT thumb_key FROM photos WHERE thumb_key IS NOT NULL")
+    ]
     for key in keys:
         store.delete(key)
 

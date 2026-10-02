@@ -1,0 +1,30 @@
+{
+  "name": "inspection-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web front end for the inspection API. No business logic: the API is the only authority.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1 --port 4700",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 4700",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/lib/*.test.ts\" \"server/*.test.mjs\""
+  },
+  "dependencies": {
+    "next": "16.3.8",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "16.3.8",
+    "typescript": "~5.9.3"
+  }
+}

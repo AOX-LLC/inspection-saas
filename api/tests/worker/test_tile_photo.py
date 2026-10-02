@@ -4,6 +4,7 @@ import io
 import json
 from uuid import uuid4
 
+import psycopg
 import pytest
 from botocore.exceptions import ClientError
 from PIL import Image
@@ -12,7 +13,7 @@ from sqlalchemy.exc import DBAPIError
 
 from app.db.engine import create_session_factory
 from app.db.tenant import tenant_transaction
-from app.storage.keys import photo_prefix, tile_key
+from app.storage.keys import photo_prefix, thumbnail_key, tile_key
 from app.tiling import plan_tiles
 from app.worker.jobs import JobQueue
 from tests.worker.conftest import (
@@ -341,3 +342,61 @@ async def test_the_worker_cannot_see_another_orgs_rows_even_by_asking_directly(
             )
     assert (seen, by_id, updated) == (0, 0, 0)
     assert photo_state(victim)[0] == "queued"
+
+
+# Thumbnails --------------------------------------------------------------------
+
+
+def thumbnail_key_of(photo) -> str | None:
+    return query(photo.org.id, "SELECT thumb_key FROM photos WHERE id = %s", (photo.id,))[0][0]
+
+
+async def test_a_tiled_photo_has_one_small_thumbnail_under_its_prefix(worker, org, store, settings):
+    photo = add_photo(org, store, jpeg())
+
+    await worker.run_until_idle()
+
+    key = thumbnail_key_of(photo)
+    assert key == thumbnail_key(org.id, org.project_id, photo.id)
+    assert key.startswith(photo_prefix(org.id, org.project_id, photo.id))
+    body = store.read(key, max_bytes=1_000_000)
+    assert body.startswith(b"\xff\xd8\xff")
+    with Image.open(io.BytesIO(body)) as thumbnail:
+        # 1500 x 1000 fitted inside the thumbnail size, aspect kept.
+        assert max(thumbnail.size) == settings.thumbnail_size
+        assert thumbnail.size == (settings.thumbnail_size, round(settings.thumbnail_size * 2 / 3))
+    assert len(body) < 50_000
+
+
+async def test_a_small_photo_is_not_enlarged_for_its_thumbnail(worker, org, store):
+    photo = add_photo(org, store, jpeg((200, 100)))
+
+    await worker.run_until_idle()
+
+    body = store.read(thumbnail_key_of(photo), max_bytes=1_000_000)
+    with Image.open(io.BytesIO(body)) as thumbnail:
+        assert thumbnail.size == (200, 100)
+
+
+async def test_the_thumbnail_is_not_one_of_the_tiles(worker, org, store):
+    photo = add_photo(org, store, jpeg())
+
+    await worker.run_until_idle()
+
+    assert thumbnail_key_of(photo) not in {row[8] for row in tile_rows(photo)}
+
+
+async def test_a_photo_that_cannot_be_tiled_has_no_thumbnail(worker, org, store):
+    photo = add_photo(org, store, b"not an image", content_type="image/png")
+
+    await worker.run_until_idle()
+
+    assert thumbnail_key_of(photo) is None
+
+
+async def test_the_database_refuses_a_thumbnail_key_outside_its_photo(worker, org, store):
+    photo = add_photo(org, store, jpeg())
+    other = thumbnail_key(org.id, org.project_id, uuid4())
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        query(photo.org.id, "UPDATE photos SET thumb_key = %s WHERE id = %s", (other, photo.id))

@@ -36,3 +36,4 @@ data/local/
 .DS_Store
 .idea/
 .vscode/
+*.tsbuildinfo

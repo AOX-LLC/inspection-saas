@@ -33,11 +33,17 @@ def batch_photos(count: int = BATCH_SIZE, *, seed: int = 0) -> Iterator[BatchPho
     for index in range(count):
         portrait = index % 5 == 0
         sideways = index % 10 == 3
-        # A sideways photo is stored landscape and shown portrait.
+        # A sideways photo is stored landscape and shown portrait. As a phone does, the
+        # displayed (upright) picture is turned back by the inverse of the tag, so that
+        # applying the tag restores it: rotating 90 degrees counter-clockwise undoes
+        # EXIF orientation 6, "rotate 90 degrees clockwise to display".
         stored = PORTRAIT if portrait and not sideways else LANDSCAPE
+        drawn = (stored[1], stored[0]) if sideways else stored
         image = render_demo_photo(
-            f"batch photo {index:02d}", seed * 1000 + index, width=stored[0], height=stored[1]
+            f"batch photo {index:02d}", seed * 1000 + index, width=drawn[0], height=drawn[1]
         )
+        if sideways:
+            image = image.rotate(90, expand=True)
         data = encode_jpeg(image, orientation=ROTATE_CLOCKWISE if sideways else None)
         shown = (stored[1], stored[0]) if sideways else stored
         yield BatchPhoto(index, f"synthetic-batch-{index:02d}.jpg", data, *shown)
