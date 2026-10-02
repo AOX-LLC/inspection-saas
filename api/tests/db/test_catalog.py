@@ -17,7 +17,22 @@ DISPATCHER_ROLE = "inspection_dispatcher"
 # Who may own SECURITY DEFINER functions, by schema. They run with the owner's
 # rights, so the owner is a decision, not a default: a new definer function
 # fails the ownership check until its schema is listed here on purpose.
-DEFINER_OWNER_BY_SCHEMA = {"auth": AUTH_ROLE}
+DEFINER_OWNER_BY_SCHEMA = {"auth": AUTH_ROLE, "queue": DISPATCHER_ROLE}
+
+# Exactly who may execute each SECURITY DEFINER function, besides its owner. A
+# new definer function fails until it is listed here on purpose, and a function
+# that is not listed is expected to have no grantee at all. Login and sessions
+# belong to the API; the queue, and the purge of dead sessions, to the worker.
+DEFINER_EXECUTE_GRANTEES = {
+    "auth.verify_login(text)": {APP_ROLE},
+    "auth.create_session(uuid,bytea,integer)": {APP_ROLE},
+    "auth.resolve_session(bytea,integer)": {APP_ROLE},
+    "auth.revoke_session(bytea)": {APP_ROLE},
+    "queue.jobs_claim(text,text[],integer)": {WORKER_ROLE},
+    "queue.jobs_complete(uuid,text)": {WORKER_ROLE},
+    "queue.jobs_fail(uuid,text,text,boolean,integer)": {WORKER_ROLE},
+    "queue.abandoned_uploads(integer,integer)": {WORKER_ROLE},
+}
 
 # Global reference data (not tenant-owned) goes here, read-only for the app: a
 # table on this list must not grant the app INSERT, UPDATE or DELETE, because
@@ -175,11 +190,11 @@ def definer_functions_with_wrong_owner(connection: psycopg.Connection) -> dict[s
 
 
 def definer_functions_with_unexpected_execute(connection: psycopg.Connection) -> dict[str, set]:
-    """Definer functions whose EXECUTE grantees (besides the owner) are not exactly the app."""
+    """Definer functions whose EXECUTE grantees (besides the owner) are not the listed ones."""
     return {
         name: grantees
         for name, _, _, grantees in definer_functions(connection)
-        if grantees != {APP_ROLE}
+        if grantees != DEFINER_EXECUTE_GRANTEES.get(name, set())
     }
 
 
@@ -668,14 +683,18 @@ def test_definer_functions_exist(app_conn):
         "auth.create_session(uuid,bytea,integer)",
         "auth.resolve_session(bytea,integer)",
         "auth.revoke_session(bytea)",
+        "queue.jobs_claim(text,text[],integer)",
+        "queue.jobs_complete(uuid,text)",
+        "queue.jobs_fail(uuid,text,text,boolean,integer)",
+        "queue.abandoned_uploads(integer,integer)",
     }
 
 
-def test_definer_functions_are_owned_by_the_auth_role(app_conn):
+def test_definer_functions_are_owned_by_their_schemas_approved_role(app_conn):
     assert definer_functions_with_wrong_owner(app_conn) == {}
 
 
-def test_definer_functions_are_executable_by_the_app_alone(app_conn):
+def test_definer_functions_are_executable_by_their_listed_roles_alone(app_conn):
     assert definer_functions_with_unexpected_execute(app_conn) == {}
 
 
