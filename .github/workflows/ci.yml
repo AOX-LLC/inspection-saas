@@ -63,6 +63,29 @@ jobs:
         if: always()
         run: docker compose --profile test down -v
 
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Start the stack
+        run: docker compose up -d --build --wait
+
+      - name: Log in, upload, download, and check another org is a 404
+        run: scripts/smoke.sh
+
+      - name: Show service logs
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
   secrets:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

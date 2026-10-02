@@ -6,7 +6,10 @@ requires-python = ">=3.12,<3.13"
 license = "MIT"
 dependencies = [
     "alembic>=1.20.0",
+    "argon2-cffi>=25.1.0",
+    "boto3>=1.43.107",
     "fastapi>=0.142.2",
+    "pillow>=12.3.0",
     "psycopg[binary]>=3.3.6",
     "pydantic-settings>=2.15.0",
     "sqlalchemy[asyncio]>=2.1.2",

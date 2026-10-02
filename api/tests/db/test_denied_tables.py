@@ -23,7 +23,7 @@ def test_app_cannot_touch_sessions_even_with_context(app_conn, statement):
 
 def test_owner_cannot_write_sessions_directly(owner_conn):
     # No policy exists, so FORCE RLS rejects the owner's writes too.
-    # Phase 1b reaches sessions only through SECURITY DEFINER functions.
+    # Sessions are reached only through the SECURITY DEFINER auth functions.
     set_context(owner_conn, org_id=TENANT_A.org_id, user_id=TENANT_A.user_id)
     with pytest.raises(errors.InsufficientPrivilege, match="violates row-level security"):
         owner_conn.execute(
@@ -31,6 +31,28 @@ def test_owner_cannot_write_sessions_directly(owner_conn):
             "VALUES (%s, sha256('x'), now())",
             (TENANT_A.user_id,),
         )
+
+
+CREDENTIAL_STATEMENTS = [
+    "SELECT * FROM credentials",
+    "SELECT password_hash FROM credentials",
+    "INSERT INTO credentials (user_id, password_hash) VALUES (gen_random_uuid(), repeat('x', 30))",
+    "UPDATE credentials SET password_hash = repeat('x', 30)",
+    "DELETE FROM credentials",
+]
+
+
+@pytest.mark.parametrize("statement", CREDENTIAL_STATEMENTS)
+def test_app_cannot_touch_credentials_even_with_context(app_conn, statement):
+    set_context(app_conn, org_id=TENANT_A.org_id, user_id=TENANT_A.user_id)
+    with pytest.raises(errors.InsufficientPrivilege, match="permission denied for table"):
+        app_conn.execute(statement)
+
+
+def test_owner_cannot_read_credentials_directly(owner_conn):
+    # Forced RLS with no policy: the owner sees no rows either.
+    set_context(owner_conn, user_id=TENANT_A.user_id)
+    assert owner_conn.execute("SELECT count(*) FROM credentials").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

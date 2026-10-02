@@ -18,6 +18,8 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db.engine import TENANT_CONTEXT_KEY
+
 _SET_CONTEXT = text(
     "SELECT set_config('app.org_id', :org_id, true), set_config('app.user_id', :user_id, true)"
 )
@@ -60,6 +62,7 @@ async def _transaction_with_context(
     # UUID-typed arguments mean nothing but a canonical UUID string or '' can
     # reach set_config. An empty setting reads as "unset" to the policies.
     async with session_factory() as session, session.begin():
+        session.sync_session.info[TENANT_CONTEXT_KEY] = True
         await session.execute(
             _SET_CONTEXT,
             {"org_id": _as_setting(org_id), "user_id": _as_setting(user_id)},

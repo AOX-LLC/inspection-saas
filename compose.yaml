@@ -25,6 +25,8 @@ services:
     security_opt: ["no-new-privileges:true"]
     volumes:
       - secrets:/secrets
+      # Mounted only so the script can hand it to the object store's user.
+      - objectdata:/objectdata
       - ./infra/secrets/generate.sh:/generate.sh:ro
 
   db:
@@ -35,7 +37,13 @@ services:
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=peer"
     volumes:
       - pgdata:/var/lib/postgresql
-      - secrets:/run/inspection-secrets:ro
+      # Only the database's own secrets, not the whole volume.
+      - type: volume
+        source: secrets
+        target: /run/inspection-secrets/db
+        read_only: true
+        volume:
+          subpath: db
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     ports:
       - "127.0.0.1:4702:5432"
@@ -67,19 +75,73 @@ services:
       db:
         condition: service_healthy
 
+  objectstore:
+    mem_limit: 128m
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Not root: it can then read only the secrets group-shared with it.
+    user: "10004:10004"
+    volumes:
+      - objectdata:/var/lib/garage
+      - ./infra/garage/garage.toml:/etc/garage.toml:ro
+      # Only the object store's own secrets, not the whole volume.
+      - type: volume
+        source: secrets
+        target: /run/inspection-secrets/objectstore
+        read_only: true
+        volume:
+          subpath: objectstore
+    # Only the S3 API is published. RPC (3901) and the admin API (3903) are not.
+    ports:
+      - "127.0.0.1:4703:3900"
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+    healthcheck:
+      # The image has no shell or curl; the binary's own status call is the probe.
+      test: ["CMD", "/garage", "status"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  # Garage starts with no layout, bucket or key. This creates them, then exits.
+  objectstore-init:
+    mem_limit: 128m
+    <<: *hardening
+    build: *api-build
+    image: *api-image
+    user: "10004:10004"
+    group_add: ["10005"]
+    command: ["python", "-m", "app.storage.init"]
+    environment:
+      APP_ENV: demo
+    volumes:
+      - secrets:/run/inspection-secrets:ro
+    depends_on:
+      objectstore:
+        condition: service_healthy
+
   seed:
     mem_limit: 256m
     <<: *hardening
     build: *api-build
     image: *api-image
     user: "10002:10002"
+    group_add: ["10005"]
     command: ["python", "-m", "app.seed"]
     environment:
       APP_ENV: demo
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://127.0.0.1:4703}
     volumes:
       - secrets:/run/inspection-secrets:ro
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      objectstore-init:
         condition: service_completed_successfully
 
   api:
@@ -87,9 +149,12 @@ services:
     <<: *hardening
     build: *api-build
     image: *api-image
+    group_add: ["10005"]
     environment:
       APP_ENV: demo
       MODEL_MODE: ${MODEL_MODE:-mock}
+      # The address a browser on this machine reaches the object store at.
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://127.0.0.1:4703}
     volumes:
       - secrets:/run/inspection-secrets:ro
     ports:
@@ -98,6 +163,8 @@ services:
       migrate:
         condition: service_completed_successfully
       seed:
+        condition: service_completed_successfully
+      objectstore-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"]
@@ -115,16 +182,22 @@ services:
       target: test
     image: inspection-saas-api:test
     user: "10003:10003"
-    group_add: ["10001", "10002"]
+    group_add: ["10001", "10002", "10005"]
     environment:
       APP_ENV: test
       DB_NAME: inspection_test
+      # Tests fetch presigned URLs from inside this container, so they are
+      # signed for the object store's name on the Compose network.
+      S3_PUBLIC_ENDPOINT: http://objectstore:3900
     volumes:
       - secrets:/run/inspection-secrets:ro
     depends_on:
       db:
         condition: service_healthy
+      objectstore-init:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:
   secrets:
+  objectdata:

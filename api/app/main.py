@@ -1,24 +1,36 @@
-"""FastAPI application. Phase 1a serves only the health check."""
+"""FastAPI application: health, auth, projects and file transfer."""
 
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.auth.ratelimit import LoginRateLimiter
+from app.auth.router import router as auth_router
 from app.config import AppEnv, get_settings
-from app.db.engine import create_engine
+from app.db.engine import create_engine, create_session_factory
+from app.files.router import router as files_router
+from app.http_security import protect
+from app.projects.router import router as projects_router
+from app.storage.s3 import ObjectStore
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    engine = create_engine(get_settings().app_database_url())
+    settings = get_settings()
+    engine = create_engine(settings.app_database_url())
     app.state.engine = engine
+    app.state.session_factory = create_session_factory(engine)
+    app.state.object_store = ObjectStore(settings)
+    # In memory: correct for one API process. See app/auth/ratelimit.py.
+    app.state.login_limiter = LoginRateLimiter()
     try:
         yield
     finally:
@@ -34,8 +46,19 @@ def create_app() -> FastAPI:
         redoc_url=None,
         openapi_url=None if is_production else "/openapi.json",
     )
+    app.middleware("http")(protect)
+    app.add_exception_handler(RequestValidationError, validation_error)
     app.add_api_route("/health", health, methods=["GET"], include_in_schema=False)
+    app.include_router(auth_router)
+    app.include_router(projects_router)
+    app.include_router(files_router)
     return app
+
+
+async def validation_error(request: Request, error: RequestValidationError) -> JSONResponse:
+    """422 without the offending input, which can be a password."""
+    detail = [{"loc": e["loc"], "msg": e["msg"], "type": e["type"]} for e in error.errors()]
+    return JSONResponse({"detail": detail}, status_code=422)
 
 
 async def health(request: Request) -> JSONResponse:
