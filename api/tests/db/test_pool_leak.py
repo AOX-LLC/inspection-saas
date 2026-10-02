@@ -53,6 +53,12 @@ async def _assert_no_context_on_reuse(
 ) -> None:
     async with factory() as session, session.begin():
         assert await _backend_pid(session) == expected_pid
+        settings = await session.execute(
+            text("SELECT current_setting('app.org_id', true), current_setting('app.user_id', true)")
+        )
+        assert settings.one() == ("", "")
+        orgs = await session.execute(text("SELECT count(*) FROM orgs"))
+        assert orgs.scalar_one() == 0
         with pytest.raises(DBAPIError) as raised:
             await session.execute(text("SELECT id FROM projects"))
         assert isinstance(raised.value.orig, errors.InsufficientPrivilege)

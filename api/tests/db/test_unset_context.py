@@ -1,7 +1,9 @@
 """With no tenant context, tenant tables raise and identity tables show nothing.
 
 Raising matters: an unset context that returned an empty list would look like
-"no data" and hide the bug that forgot to set it.
+"no data" and hide the bug that forgot to set it. The accessor raises when a
+row is checked against the policy, so a query that matches no rows at all may
+return empty instead. Either way it never returns rows.
 """
 
 import psycopg
@@ -36,6 +38,16 @@ def test_identity_tables_show_nothing_without_context(app_conn, table):
 def test_creating_an_org_without_context_raises(app_conn):
     with pytest.raises(errors.InsufficientPrivilege, match=CONTEXT_NOT_SET):
         app_conn.execute("INSERT INTO orgs (name) VALUES ('Synthetic')")
+
+
+def test_a_query_matching_no_rows_returns_nothing(app_conn):
+    # Whether this raises depends on the plan; the guarantee is that it never
+    # returns rows. Do not rely on it raising.
+    try:
+        rows = app_conn.execute("SELECT id FROM files WHERE object_key = 'no/such/key'").fetchall()
+    except errors.InsufficientPrivilege:
+        rows = []
+    assert rows == []
 
 
 def test_an_empty_setting_counts_as_unset(app_conn):

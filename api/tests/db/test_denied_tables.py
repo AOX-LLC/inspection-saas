@@ -21,8 +21,8 @@ def test_app_cannot_touch_sessions_even_with_context(app_conn, statement):
         app_conn.execute(statement)
 
 
-def test_owner_reads_no_sessions_directly(owner_conn):
-    # No policy exists, so FORCE RLS hides every row from the owner too.
+def test_owner_cannot_write_sessions_directly(owner_conn):
+    # No policy exists, so FORCE RLS rejects the owner's writes too.
     # Phase 1b reaches sessions only through SECURITY DEFINER functions.
     set_context(owner_conn, org_id=TENANT_A.org_id, user_id=TENANT_A.user_id)
     with pytest.raises(errors.InsufficientPrivilege, match="violates row-level security"):
