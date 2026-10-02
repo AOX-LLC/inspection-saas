@@ -36,6 +36,11 @@ EXPECTED_APP_PRIVILEGES = {
     "memberships": DML,
     "projects": DML,
     "files": DML,
+    # The API records an upload's photo and enqueues its job; the worker, not a
+    # request, changes them afterwards.
+    "photos": {"SELECT", "INSERT"},
+    "tiles": {"SELECT"},
+    "jobs": {"INSERT"},
     "audit_events": {"SELECT", "INSERT"},
     "sessions": set(),
     "credentials": set(),
