@@ -33,6 +33,7 @@ from app.config import get_settings
 from app.db.tenant import tenant_transaction
 from app.deps import ObjectStoreDep, SessionFactoryDep
 from app.orgs.access import MemberAccess, OrgAccess, WriterAccess
+from app.pagination import decode_cursor, next_cursor
 from app.photos.service import register_photo
 from app.storage.content_types import ALLOWED_CONTENT_TYPES, detect_content_type
 from app.storage.keys import assert_key_in_org, original_key, staging_key
@@ -57,12 +58,23 @@ _PENDING_COUNT = text(
 _UNPROCESSED_COUNT = text(
     "SELECT count(*) FROM photos WHERE org_id = :org_id AND status IN ('queued', 'processing')"
 )
-_LIST = text(
+# Keyset pages, served by files_project_created_idx. The two forms are separate
+# statements so the first page does not carry a placeholder the planner must guess at.
+_LIST_FIRST = text(
     """
     SELECT id, content_type, size_bytes, status, original_filename, created_at
     FROM files WHERE project_id = :project_id AND org_id = :org_id
     ORDER BY created_at, id
-    LIMIT :limit OFFSET :offset
+    LIMIT :limit
+    """
+)
+_LIST_AFTER = text(
+    """
+    SELECT id, content_type, size_bytes, status, original_filename, created_at
+    FROM files WHERE project_id = :project_id AND org_id = :org_id
+      AND (created_at, id) > (:after_created_at, :after_id)
+    ORDER BY created_at, id
+    LIMIT :limit
     """
 )
 _INSERT = text(
@@ -139,7 +151,8 @@ class FileOut(BaseModel):
 
 class FilePage(BaseModel):
     items: list[FileOut]
-    has_more: bool
+    # Pass as `cursor` to get the next page; None on the last one.
+    next_cursor: str | None
 
 
 def _file_out(row: Row) -> FileOut:
@@ -177,24 +190,18 @@ async def list_files(
     access: MemberAccess,
     factory: SessionFactoryDep,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    cursor: Annotated[str | None, Query()] = None,
 ) -> FilePage:
+    after = decode_cursor(cursor)
+    params: dict = {"project_id": project_id, "org_id": access.org_id, "limit": limit + 1}
+    if after is not None:
+        params |= {"after_created_at": after.created_at, "after_id": after.id}
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
         await _require_project(session, access.org_id, project_id)
-        rows = (
-            await session.execute(
-                _LIST,
-                {
-                    "project_id": project_id,
-                    "org_id": access.org_id,
-                    "limit": limit + 1,
-                    "offset": offset,
-                },
-            )
-        ).all()
+        # One extra row says whether another page exists.
+        rows = (await session.execute(_LIST_FIRST if after is None else _LIST_AFTER, params)).all()
     return FilePage(
-        items=[_file_out(r) for r in rows[:limit]],
-        has_more=len(rows) > limit,
+        items=[_file_out(r) for r in rows[:limit]], next_cursor=next_cursor(rows, limit)
     )
 
 
