@@ -3,7 +3,8 @@
 - Status: accepted
 - Date: 2026-10-02
 
-ADRs 0001 (object store) and 0002 (authentication) arrive with Phase 1b.
+See also [ADR 0001](0001-object-store.md) (object store) and
+[ADR 0002](0002-auth.md) (authentication).
 
 ## Context
 
@@ -43,8 +44,9 @@ policy, so a bug that forgets the context errors on any query that reaches a
 row, instead of returning an empty list that looks like "no data". A query
 that matches no rows at all (an empty table, a lookup by a key that does not
 exist) may return empty without raising. It never returns rows, and the
-tests do not rely on it raising. Phase 1b adds a session-layer guard that
-refuses database work not opened through `tenant.py`.
+tests do not rely on it raising. The sessions the API uses refuse to run SQL
+unless `tenant.py` opened their transaction (`TenantSession` in
+`api/app/db/engine.py`), so forgetting the context is an immediate error.
 
 **Identity tables.** `orgs`, `users` and `memberships` must be readable before
 an org is chosen (to list a user's orgs) and their policies combine
@@ -104,14 +106,16 @@ app role:
   Code that forgets gets an error in development, not a leak in production.
 - RLS does not check membership. The API must confirm that the user belongs to
   the org before it sets `app.org_id`, and it answers 404 for orgs the user is
-  not in so their existence is not revealed (Phase 1b).
+  not in so their existence is not revealed (`api/app/orgs/access.py`).
 - Work that has no user, such as background jobs, needs its own path to a
   tenant context. Phase 2 adds a claim function that returns a job's org, and
   the worker then sets context and runs under RLS like the API.
 - Logins and session lookups happen before any context exists, and FORCE RLS
-  binds the owner too. Phase 1b adds narrow SECURITY DEFINER functions for
-  them, owned by a dedicated role, with a pinned `search_path`, no PUBLIC
-  `EXECUTE`, and `EXECUTE` granted only to the app role.
+  binds the owner too. Narrow SECURITY DEFINER functions in schema `auth`
+  serve them, owned by the dedicated `inspection_auth` role (NOLOGIN,
+  BYPASSRLS, owns nothing else), with a pinned `search_path`, no PUBLIC
+  `EXECUTE`, and `EXECUTE` granted only to the app role. See
+  [ADR 0002](0002-auth.md).
 - Policies add a small cost to every query. The per-statement accessor and the
   `org_id` indexes keep it low; it is not measured yet.
 
@@ -123,5 +127,5 @@ app role:
   connection pools multiply with the number of orgs.
 - **Membership checks inside the policies.** Would also stop an API bug that
   sets the wrong org. Rejected for now: it adds a join to every query and does
-  not fit work with no user, such as jobs. The API check and the route tests
-  in Phase 1b cover that case instead.
+  not fit work with no user, such as jobs. The API check and the route-walker
+  test cover that case instead.
