@@ -72,9 +72,11 @@ attempts left also becomes `failed`, so a file that kills its worker cannot loop
 forever. That sweep happens in SQL, where the photo is out of reach, so the
 worker's housekeeping finds photos whose job has failed (`stuck_photos`) and
 marks them failed under their own org's context; a project's progress can
-therefore always finish. A handler is also given up on after `JOB_LOCK_SECONDS`
-(the thread decoding a pathological file cannot be interrupted, but the loop
-stops waiting for it and the job is retried). A lock holder's name includes a
+therefore always finish. A handler is also given up on after 90% of `JOB_LOCK_SECONDS` (at most an hour,
+what the claim allows). The thread decoding a pathological file cannot be
+interrupted, but the loop stops waiting for it and the job is retried; the
+thread's decode slot is held until it really ends, so a second decode never
+starts beside it in a container sized for one. A lock holder's name includes a
 random part, so another worker cannot guess it. Errors stored on a job or photo are fixed codes, never messages.
 Handlers are written to be repeated; processing is at-least-once.
 
@@ -105,7 +107,10 @@ both copy), checks the staged object's size and magic bytes, copies it
 server-side to `.../original` pinned to the etag it checked, re-checks the copy,
 then deletes the staged object. A failure before publishing releases the row back
 to `pending`; one that is never released is removed by the cleanup like any
-abandoned upload. The
+abandoned upload. An upload within ten minutes of that age can no longer be
+completed (`complete` answers 409), so cleanup never removes a row that is being
+completed. A cancelled request is not released either, because its copy may still
+be running; the cleanup removes the row later. The
 final key is never a POST target, so a finished upload cannot be overwritten
 inside the POST's expiry window.
 
@@ -117,6 +122,9 @@ inside the POST's expiry window.
   failure rolls the delete back and nothing is orphaned.
 - A finished upload's staging key is deleted once after the POST has expired
   (a replay can recreate it) and `files.staging_swept_at` records that.
+- Photos whose job failed are marked failed (`queue.stuck_photos`, served by
+  partial indexes on unfinished photos and failed jobs). Each cleanup step runs
+  even if another fails.
 - Dead sessions are removed by `auth.purge_sessions`, a fifth `SECURITY DEFINER`
   function owned by the auth role and executable by the worker alone. The worker
   has no grant on `sessions`.
@@ -160,8 +168,9 @@ back through the progress endpoint.
   intended mechanism and is not built; it must exist before this holds personal
   data.
 - **No fairness between orgs.** Claims are first come, first served. Each org is
-  limited to 2000 photos waiting or running, which bounds how long one org can
-  hold the others up; round-robin claiming is not built.
+  limited to about 2000 photos waiting or running (checked when an upload starts,
+  by count then insert, so it can be overshot by the uploads already in flight),
+  which bounds how long one org can hold the others up; round-robin claiming is not built.
 - **Finished jobs are never pruned.**
 - **The API role can insert a job with any column set** (status, attempts, lock),
   not only the three it needs, and the dispatcher can update any job column.

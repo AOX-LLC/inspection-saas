@@ -20,7 +20,7 @@ published port is bound to 127.0.0.1.
 | `objectstore-init` | none | Phase 1b | One-shot. Creates the layout, key, bucket and CORS on a fresh object store. |
 | `migrate` | none | Phase 1a | One-shot. Alembic migrations as the owner role. |
 | `seed` | none | Phase 1a | One-shot. Synthetic demo data and generated images; refuses to run unless `APP_ENV=demo`. |
-| `test` | none | Phase 1a | Profile `test`. Runs the isolation, API and storage suites against `inspection_test` and the object store. |
+| `test` | none | Phase 1a | Profile `test`. Runs the isolation, API, storage and worker suites against `inspection_test` and the object store. |
 | `web` | 4700 | planned | Web front end, same-origin with the API. |
 | `worker` | none | Phase 2a | Same image as the API (`python -m app.worker`), run as the worker role with a 768 MB memory limit. Tiles photos from a Postgres job queue and does housekeeping. The detector, model pass, retrieval and PDFs arrive in later phases. See [ADR 0004](adr/0004-job-queue.md). |
 
@@ -72,7 +72,7 @@ read-only root filesystem, all capabilities dropped, and
 | `inspection_owner` | migrate, seed, tests | Owns the schema and every table. Bound by RLS because every table forces it. |
 | `inspection_app` | API, tests | DML only. Owns nothing, no `BYPASSRLS`, cannot create objects or temporary tables. Executes the `auth` functions. |
 | `inspection_worker` | worker, tests | Like the app role: owns nothing, no `BYPASSRLS`, no inherited roles. Direct grants on `files`, `photos`, `tiles` and `audit_events` only, no access to `jobs`, and `EXECUTE` on the `queue` functions and `auth.purge_sessions`. See [ADR 0004](adr/0004-job-queue.md). |
-| `inspection_auth` | nobody logs in | `NOLOGIN`, `BYPASSRLS`. Owns only the four SECURITY DEFINER functions in schema `auth`. The owner can `SET ROLE` to it (migrations, seed) but does not inherit it. See [ADR 0002](adr/0002-auth.md). |
+| `inspection_auth` | nobody logs in | `NOLOGIN`, `BYPASSRLS`. Owns only the five SECURITY DEFINER functions in schema `auth`. The owner can `SET ROLE` to it (migrations, seed) but does not inherit it. See [ADR 0002](adr/0002-auth.md). |
 | `inspection_dispatcher` | nobody logs in | `NOLOGIN`, `BYPASSRLS`. Owns only the SECURITY DEFINER functions in schema `queue`, which find the next due job across orgs. Same arrangement as the auth role. See [ADR 0004](adr/0004-job-queue.md). |
 
 Alembic's version table lives in a separate `migrations` schema that the app
