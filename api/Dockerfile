@@ -1,13 +1,14 @@
 # syntax=docker/dockerfile:1
-FROM ghcr.io/astral-sh/uv:0.12.22 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.22@sha256:f513a91fc62fe7c17567eee97230dd198e43edb8a9fbecca843714a4358fe1bc AS uv
 
-FROM python:3.12.15-slim-trixie AS base
+FROM python:3.12.15-slim-trixie@sha256:29113dcae7aad06daa8e95260fa09f27d62be33b9687ea3774f771d601a02256 AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_CACHE_DIR=/root/.cache/uv \
     PATH=/opt/venv/bin:$PATH \
     HOME=/tmp
 WORKDIR /srv/api
@@ -30,7 +31,7 @@ CMD ["pytest"]
 
 # Last stage, so it is the default build target. Built from the plain Python
 # image, not from base, so the final image does not contain uv.
-FROM python:3.12.15-slim-trixie AS runtime
+FROM python:3.12.15-slim-trixie@sha256:29113dcae7aad06daa8e95260fa09f27d62be33b9687ea3774f771d601a02256 AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH=/opt/venv/bin:$PATH \
