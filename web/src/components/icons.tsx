@@ -2,9 +2,9 @@ import type { ReactNode } from "react";
 
 // One icon set: 24px grid, 1.75 stroke, round caps. Decorative by default, because
 // every icon sits next to words that say the same thing.
-function Icon({ children }: { children: ReactNode }) {
+function Icon({ children, spin = false }: { children: ReactNode; spin?: boolean }) {
   return (
-    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <svg className={spin ? "icon icon-spin" : "icon"} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       {children}
     </svg>
   );
@@ -62,7 +62,7 @@ export const FolderIcon = () => (
 );
 
 export const SpinnerIcon = () => (
-  <Icon>
+  <Icon spin>
     <path d="M12 3a9 9 0 1 0 9 9" />
   </Icon>
 );

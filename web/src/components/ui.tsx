@@ -39,7 +39,7 @@ export function EmptyState({ icon, title, children }: { icon: ReactNode; title: 
   return (
     <div className="empty">
       {icon}
-      <h2>{title}</h2>
+      <p className="empty-title">{title}</p>
       {children ? <p>{children}</p> : null}
     </div>
   );

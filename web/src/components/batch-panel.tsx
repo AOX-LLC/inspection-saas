@@ -70,8 +70,10 @@ export function BatchPanel({
       <div className="batch-head">
         <div>
           <h2 id="batch-title">This upload</h2>
-          <p className="muted small tabular" role="status">
-            {summary}
+          <p className="muted small tabular">{summary}</p>
+          {/* Announced once, when the whole batch is finished, not on every file. */}
+          <p className="visually-hidden" role="status">
+            {allFinished ? summary : ""}
           </p>
         </div>
         {allFinished ? (
@@ -80,7 +82,13 @@ export function BatchPanel({
           </button>
         ) : null}
       </div>
-      <progress className="progress" max={rows.length} value={finished} aria-label="Photos finished in this upload" />
+      <progress
+        className="progress"
+        max={rows.length * 2}
+        value={uploaded + failed + finished}
+        aria-label="Progress of this upload"
+        aria-valuetext={`${finished} of ${rows.length} finished`}
+      />
       {progress && !progress.finished ? (
         <p className="muted small tabular">
           {plural(progress.counts.queued + progress.counts.processing, "photo")} in this project still waiting to be

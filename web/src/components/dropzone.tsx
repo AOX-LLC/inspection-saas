@@ -36,7 +36,7 @@ export function Dropzone({ onFiles }: { onFiles: (files: File[]) => void }) {
         type="file"
         multiple
         accept={ACCEPTED_TYPES.join(",")}
-        aria-label="Choose photos to upload"
+        aria-describedby="dropzone-hint"
         onChange={(event) => {
           const files = Array.from(event.target.files ?? []);
           // Cleared so choosing the same files again still fires a change.
@@ -46,7 +46,7 @@ export function Dropzone({ onFiles }: { onFiles: (files: File[]) => void }) {
       />
       <UploadIcon />
       <span className="dropzone-title">{dragging ? "Drop to upload" : "Drop photos here, or choose files"}</span>
-      <span className="muted small">
+      <span className="muted small" id="dropzone-hint">
         JPEG, PNG or WebP, up to {formatBytes(MAX_UPLOAD_BYTES)} each, {MAX_FILES_PER_BATCH} at a time
       </span>
     </label>

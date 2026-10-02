@@ -25,7 +25,7 @@ export function PhotoGrid({ photos, onThumbnailError }: { photos: Photo[]; onThu
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={photo.thumbnail_url}
-                alt={photo.original_filename ?? "Uploaded photo"}
+                alt=""
                 width={photo.width ?? undefined}
                 height={photo.height ?? undefined}
                 loading="lazy"
