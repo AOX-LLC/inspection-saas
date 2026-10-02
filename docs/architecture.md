@@ -139,7 +139,7 @@ metadata and never reaches a key.
 | `orgs` | identity | Visible as the context org or as an org the user belongs to. |
 | `users` | identity | Visible as yourself or as a member of the context org. |
 | `memberships` | identity | `(org_id, user_id)`, role `owner`, `admin`, `inspector` or `viewer`. |
-| `credentials` | locked | Argon2id password hashes, apart from `users`. No app access; read only by `auth.verify_login`. |
+| `credentials` | locked | Argon2id password hashes, apart from `users`. No direct app access (no grant, no policy); the app obtains a hash only through `auth.verify_login`. |
 | `sessions` | locked | Stores only a SHA-256 of the session token. No app access; reached only through the `auth` functions. |
 | `projects` | yes | |
 | `files` | yes | Object key, content type, size, status. FK `(org_id, project_id)`. |

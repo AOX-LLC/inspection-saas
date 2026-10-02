@@ -80,8 +80,13 @@ step "another org is a 404"
 [ "$(status_of GET "/orgs/$BETA_ORG/projects")" = 404 ] || fail "Beta org list was not 404"
 [ "$(status_of GET "/orgs/$BETA_ORG/projects/$BETA_PROJECT/files")" = 404 ] || fail "Beta files were not 404"
 
-step "log out and confirm the session is dead"
+step "log out and confirm the session is revoked server-side"
+# Saved first: curl drops the cookie on logout, so only a replay proves revocation.
+token="$(awk '$6 == "session" {print $7}' "$jar")"
+[ -n "$token" ] || fail "no session cookie to replay"
 api POST /auth/logout >/dev/null
-[ "$(status_of GET "/orgs/$ALPHA_ORG/projects")" = 401 ] || fail "session still valid after logout"
+code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 \
+  -H "Cookie: session=$token" "$API/orgs/$ALPHA_ORG/projects")"
+[ "$code" = 401 ] || fail "old session token still works after logout ($code)"
 
 echo "smoke: ok"

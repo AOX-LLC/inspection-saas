@@ -4,9 +4,12 @@ Each test follows what an attacker or a mistaken client could do with a URL:
 edit it, wait it out, strip its signature, or bend the POST policy.
 """
 
+import base64
+import json
 import re
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -202,7 +205,9 @@ def test_no_url_lives_longer_than_the_cap(store):
     post = store.presign_upload(new_key(), "image/png", 10, 10**9)
 
     assert expires == MAX_PRESIGN_TTL_SECONDS
-    assert post.fields  # a policy was produced even with an absurd request
+    policy = json.loads(base64.b64decode(post.fields["policy"]))
+    expiry = datetime.fromisoformat(policy["expiration"].replace("Z", "+00:00"))
+    assert expiry <= datetime.now(UTC) + timedelta(seconds=MAX_PRESIGN_TTL_SECONDS + 5)
 
 
 def test_urls_are_signed_for_the_public_endpoint(store):

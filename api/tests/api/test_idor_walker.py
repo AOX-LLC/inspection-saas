@@ -67,7 +67,9 @@ SAMPLE_BODIES = {
 # row-level security, so an "email already taken" answer would reveal accounts
 # in other orgs. Any such route must return one generic answer and be tested for
 # it; until then, adding one fails this suite.
-ACCOUNT_CREATION_WORDS = ("signup", "sign-up", "register", "invite")
+ACCOUNT_CREATION_WORDS = (
+    "signup", "sign-up", "register", "invite", "member", "user", "account", "join",
+)  # fmt: skip
 
 
 def fill(path: str, *, org, project, file) -> str:
