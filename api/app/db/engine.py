@@ -1,5 +1,6 @@
 """Async engines and session factories for the app and owner roles."""
 
+from sqlalchemy import event
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -7,6 +8,25 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import ORMExecuteState, Session
+
+# Set on a session by app/db/tenant.py, just before it sets tenant context.
+TENANT_CONTEXT_KEY = "tenant_context_opened"
+
+
+class TenantSession(Session):
+    """A session that refuses to run SQL unless tenant.py opened its transaction.
+
+    Code that takes a session from the factory directly would otherwise reach
+    the database with no tenant context. The database still fails closed, but
+    this turns the mistake into an immediate, explicit error.
+    """
+
+
+@event.listens_for(TenantSession, "do_orm_execute")
+def _require_tenant_transaction(state: ORMExecuteState) -> None:
+    if not state.session.info.get(TENANT_CONTEXT_KEY):
+        raise RuntimeError("database work must go through tenant_transaction or user_transaction")
 
 
 def create_engine(url: URL, *, pool_size: int = 5, max_overflow: int = 5) -> AsyncEngine:
@@ -23,4 +43,6 @@ def create_engine(url: URL, *, pool_size: int = 5, max_overflow: int = 5) -> Asy
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    return async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False, sync_session_class=TenantSession
+    )

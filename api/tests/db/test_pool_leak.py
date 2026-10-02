@@ -12,7 +12,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import get_settings
-from app.db.engine import create_engine, create_session_factory
+from app.db.engine import TENANT_CONTEXT_KEY, create_engine, create_session_factory
 from app.db.tenant import tenant_transaction, user_transaction
 from tests.db.conftest import CONTEXT_NOT_SET, TENANT_A, app_conninfo, ids, set_context
 
@@ -52,6 +52,9 @@ async def _assert_no_context_on_reuse(
     factory: async_sessionmaker[AsyncSession], expected_pid: int
 ) -> None:
     async with factory() as session, session.begin():
+        # This probes the database with no context on purpose, which the app's
+        # session guard would refuse (see test_session_guard.py).
+        session.sync_session.info[TENANT_CONTEXT_KEY] = True
         assert await _backend_pid(session) == expected_pid
         settings = await session.execute(
             text("SELECT current_setting('app.org_id', true), current_setting('app.user_id', true)")
