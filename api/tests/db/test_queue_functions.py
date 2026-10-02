@@ -30,6 +30,12 @@ PHOTO_B = uuid4()
 # Helpers -----------------------------------------------------------------------
 
 
+def tile_key(tenant: Tenant, photo_id: UUID) -> str:
+    return (
+        f"orgs/{tenant.org_id}/projects/{tenant.project_id}/photos/{photo_id}/tiles/{uuid4()}.jpg"
+    )
+
+
 @contextmanager
 def owner_in(tenant: Tenant) -> Iterator[psycopg.Connection]:
     """The owner role in one committed transaction under the tenant's context."""
@@ -165,6 +171,7 @@ def test_the_other_functions_return_a_flag_a_status_or_ids(worker):
             "queue.jobs_complete(uuid,text)",
             "queue.jobs_fail(uuid,text,text,boolean,integer)",
             "queue.abandoned_uploads(integer,integer)",
+            "queue.stuck_photos(integer)",
         )
     }
 
@@ -172,6 +179,7 @@ def test_the_other_functions_return_a_flag_a_status_or_ids(worker):
         "queue.jobs_complete(uuid,text)": "boolean",
         "queue.jobs_fail(uuid,text,text,boolean,integer)": "text",
         "queue.abandoned_uploads(integer,integer)": "TABLE(org_id uuid, file_id uuid)",
+        "queue.stuck_photos(integer)": "TABLE(org_id uuid, photo_id uuid)",
     }
 
 
@@ -425,7 +433,7 @@ def both_orgs_have_photos() -> None:
                                    width, height, object_key)
                 VALUES (%s, %s, 0, 0, 0, 10, 10, 1, 10, 10, %s)
                 """,
-                (tenant.org_id, photo_id, f"orgs/{tenant.org_id}/t/{uuid4()}"),
+                (tenant.org_id, photo_id, tile_key(tenant, photo_id)),
             )
 
 
@@ -478,7 +486,7 @@ def test_a_worker_holding_org_as_job_cannot_write_rows_for_org_b(holding_a):
                                width, height, object_key)
             VALUES (%s, %s, 0, 99, 99, 10, 10, 1, 10, 10, %s)
             """,
-            (TENANT_B.org_id, PHOTO_B, f"orgs/{TENANT_B.org_id}/t/{uuid4()}"),
+            (TENANT_B.org_id, PHOTO_B, tile_key(TENANT_B, PHOTO_B)),
         )
 
 
@@ -490,7 +498,7 @@ def test_a_worker_holding_org_as_job_cannot_attach_org_bs_photo_to_its_own_tile(
                                width, height, object_key)
             VALUES (%s, %s, 0, 99, 99, 10, 10, 1, 10, 10, %s)
             """,
-            (TENANT_A.org_id, PHOTO_B, f"orgs/{TENANT_A.org_id}/t/{uuid4()}"),
+            (TENANT_A.org_id, PHOTO_B, tile_key(TENANT_A, PHOTO_B)),
         )
 
 
@@ -513,7 +521,7 @@ def test_a_worker_with_no_context_reads_no_rows(worker, both_orgs_have_photos):
 
 EXPECTED_WORKER_PRIVILEGES = {
     "files": {"SELECT", "DELETE"},
-    "photos": {"SELECT", "UPDATE"},
+    "photos": {"SELECT"},
     "tiles": {"SELECT", "INSERT", "DELETE"},
     "audit_events": {"INSERT"},
 }
@@ -542,7 +550,7 @@ def test_the_worker_holds_exactly_the_table_privileges_it_needs(worker_conn):
     assert {table: held for table, held in actual.items() if held} == EXPECTED_WORKER_PRIVILEGES
 
 
-def test_the_worker_has_only_one_column_grant(worker_conn):
+def test_the_worker_has_only_the_column_grants_it_needs(worker_conn):
     rows = worker_conn.execute(
         """
         SELECT c.relname || '.' || a.attname || ':' || acl.privilege_type
@@ -553,7 +561,14 @@ def test_the_worker_has_only_one_column_grant(worker_conn):
         """
     ).fetchall()
 
-    assert {row[0] for row in rows} == {"files.staging_swept_at:UPDATE"}
+    assert {row[0] for row in rows} == {
+        "files.staging_swept_at:UPDATE",
+        "photos.status:UPDATE",
+        "photos.width:UPDATE",
+        "photos.height:UPDATE",
+        "photos.error:UPDATE",
+        "photos.updated_at:UPDATE",
+    }
 
 
 @pytest.mark.parametrize(
@@ -577,6 +592,30 @@ def test_the_worker_has_only_one_column_grant(worker_conn):
 def test_the_worker_cannot_reach_what_it_has_no_business_with(worker_conn, statement):
     with pytest.raises((psycopg.errors.InsufficientPrivilege, psycopg.errors.UndefinedTable)):
         worker_conn.execute(statement)
+
+
+def test_the_worker_can_delete_only_uploads_that_never_finished(worker_conn):
+    add_file(TENANT_A, status="ready", age_seconds=7200)
+    with psycopg.connect(worker_conninfo()) as connection:
+        set_context(connection, org_id=TENANT_A.org_id)
+        removed_ready = connection.execute("DELETE FROM files WHERE status = 'ready'").rowcount
+        removed_failed = connection.execute("DELETE FROM files WHERE status = 'failed'").rowcount
+        connection.rollback()
+
+    assert (removed_ready, removed_failed) == (0, 0)
+
+
+def test_the_worker_can_delete_a_pending_or_completing_upload():
+    pending = add_file(TENANT_A, status="pending", age_seconds=7200)
+    completing = add_file(TENANT_A, status="completing", age_seconds=7200)
+    with psycopg.connect(worker_conninfo()) as connection:
+        set_context(connection, org_id=TENANT_A.org_id)
+        removed = connection.execute(
+            "DELETE FROM files WHERE id = ANY(%s)", ([pending, completing],)
+        ).rowcount
+        connection.rollback()
+
+    assert removed == 2
 
 
 def test_the_app_role_cannot_call_the_queue_functions(app_conn):
@@ -631,7 +670,7 @@ def test_the_dispatcher_holds_only_the_grants_it_needs(app_conn):
     for table, privilege in rows:
         granted.setdefault(table, set()).add(privilege)
 
-    assert granted == {"jobs": {"SELECT", "UPDATE"}, "files": {"SELECT"}}
+    assert granted == {"jobs": {"SELECT", "UPDATE"}, "files": {"SELECT"}, "photos": {"SELECT"}}
 
 
 def test_nobody_can_create_objects_in_the_queue_schema(app_conn):
@@ -702,6 +741,59 @@ def test_a_finished_upload_is_reported_until_its_staging_key_is_swept(worker):
     failed = add_file(TENANT_A, status="failed", age_seconds=7200)
 
     assert abandoned(worker) == {(TENANT_A.org_id, unswept), (TENANT_A.org_id, failed)}
+
+
+def test_an_upload_stuck_completing_is_reported_like_a_pending_one(worker):
+    stuck = add_file(TENANT_A, status="completing", age_seconds=7200)
+    add_file(TENANT_A, status="completing", age_seconds=60)
+
+    assert abandoned(worker) == {(TENANT_A.org_id, stuck)}
+
+
+# Photos whose job has failed ----------------------------------------------------
+
+
+def add_photo_with_job(tenant: Tenant, *, photo_status: str, job_status: str) -> UUID:
+    photo_id = uuid4()
+    file_id = add_file(tenant, status="ready", age_seconds=0, swept=True)
+    with owner_in(tenant) as connection:
+        connection.execute(
+            "INSERT INTO photos (id, org_id, project_id, file_id, status)"
+            " VALUES (%s, %s, %s, %s, %s)",
+            (photo_id, tenant.org_id, tenant.project_id, file_id, photo_status),
+        )
+        connection.execute(
+            "INSERT INTO jobs (org_id, kind, payload, status, attempts, locked_by, locked_until)"
+            " VALUES (%s, 'tile_photo', jsonb_build_object('photo_id', %s::text), %s, 5,"
+            " CASE WHEN %s = 'running' THEN 'w1' END,"
+            " CASE WHEN %s = 'running' THEN now() + interval '1 minute' END)",
+            (tenant.org_id, photo_id, job_status, job_status, job_status),
+        )
+    return photo_id
+
+
+def stuck(worker: psycopg.Connection, limit: int = 100) -> set[tuple]:
+    rows = worker.execute("SELECT * FROM queue.stuck_photos(%s)", (limit,))
+    return {tuple(row) for row in rows.fetchall()}
+
+
+@pytest.mark.parametrize("photo_status", ["queued", "processing"])
+def test_a_photo_whose_job_failed_is_reported_with_its_org(worker, photo_status):
+    photo = add_photo_with_job(TENANT_A, photo_status=photo_status, job_status="failed")
+
+    assert stuck(worker) == {(TENANT_A.org_id, photo)}
+
+
+@pytest.mark.parametrize(
+    ("photo_status", "job_status"),
+    [("tiled", "failed"), ("failed", "failed"), ("processing", "running"), ("queued", "queued")],
+)
+def test_a_photo_that_is_finished_or_still_has_a_live_job_is_not_stuck(
+    worker, photo_status, job_status
+):
+    add_photo_with_job(TENANT_A, photo_status=photo_status, job_status=job_status)
+
+    assert stuck(worker) == set()
 
 
 def test_the_batch_size_is_capped(worker):

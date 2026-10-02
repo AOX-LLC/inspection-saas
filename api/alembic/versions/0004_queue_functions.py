@@ -19,6 +19,9 @@ revoked from PUBLIC, and is granted to `inspection_worker` alone.
   finished, and finished uploads whose staging key has not been swept. It
   returns org and file ids only; the worker acts on them under that org's
   context.
+* `stuck_photos` finds photos still waiting or processing whose job has failed,
+  which happens when a job is failed by the claim's sweep or while the database
+  was unreachable. Ids only, for the same reason.
 
 The worker's own table grants are listed explicitly (it inherits none from the
 default privileges the app role gets), and every one is subject to the same
@@ -41,9 +44,20 @@ WORKER_ROLE = "inspection_worker"
 DISPATCHER_ROLE = "inspection_dispatcher"
 
 UPGRADE = f"""
+-- `complete` claims an upload by moving it from pending to completing before it
+-- copies anything, so two concurrent completions cannot both promote.
+ALTER TABLE files DROP CONSTRAINT files_status_check;
+ALTER TABLE files ADD CONSTRAINT files_status_check
+    CHECK (status IN ('pending', 'completing', 'ready', 'failed'));
+
 -- Set when the worker has deleted a finished upload's staging object, which a
 -- replayed presigned POST can recreate until it expires.
 ALTER TABLE files ADD COLUMN staging_swept_at timestamptz;
+
+-- Serves queue.abandoned_uploads without scanning every org's files.
+CREATE INDEX files_cleanup_idx ON files (created_at)
+    WHERE status IN ('pending', 'completing')
+       OR (status IN ('ready', 'failed') AND staging_swept_at IS NULL);
 
 -- The worker -------------------------------------------------------------------
 
@@ -53,14 +67,19 @@ GRANT EXECUTE ON FUNCTION app.org_id() TO {WORKER_ROLE};
 
 GRANT SELECT, DELETE ON files TO {WORKER_ROLE};
 GRANT UPDATE (staging_swept_at) ON files TO {WORKER_ROLE};
-GRANT SELECT, UPDATE ON photos TO {WORKER_ROLE};
+-- The worker removes only uploads that never finished; a ready file is the
+-- API's to remove. Restrictive, so it narrows the tenant policy and cannot widen it.
+CREATE POLICY files_worker_delete ON files AS RESTRICTIVE FOR DELETE TO {WORKER_ROLE}
+    USING (status IN ('pending', 'completing'));
+GRANT SELECT ON photos TO {WORKER_ROLE};
+GRANT UPDATE (status, width, height, error, updated_at) ON photos TO {WORKER_ROLE};
 GRANT SELECT, INSERT, DELETE ON tiles TO {WORKER_ROLE};
 GRANT INSERT ON audit_events TO {WORKER_ROLE};
 
 -- The dispatcher ---------------------------------------------------------------
 
 GRANT SELECT, UPDATE ON jobs TO {DISPATCHER_ROLE};
-GRANT SELECT ON files TO {DISPATCHER_ROLE};
+GRANT SELECT ON files, photos TO {DISPATCHER_ROLE};
 
 CREATE SCHEMA queue;
 REVOKE ALL ON SCHEMA queue FROM PUBLIC;
@@ -189,8 +208,30 @@ AS $$
     SELECT f.org_id, f.id
     FROM public.files f
     WHERE f.created_at < now() - make_interval(secs => greatest(p_older_than_seconds, 900))
-      AND (f.status = 'pending' OR (f.status IN ('ready', 'failed') AND f.staging_swept_at IS NULL))
+      AND (
+          f.status IN ('pending', 'completing')
+          OR (f.status IN ('ready', 'failed') AND f.staging_swept_at IS NULL)
+      )
     ORDER BY f.created_at
+    LIMIT least(greatest(p_limit, 1), 500)
+$$;
+
+-- Photos that will never be processed: still waiting or running, but their job
+-- has failed. The worker marks them failed under their own org's context.
+CREATE FUNCTION queue.stuck_photos(p_limit integer)
+    RETURNS TABLE (org_id uuid, photo_id uuid)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT p.org_id, p.id
+    FROM public.photos p
+    WHERE p.status IN ('queued', 'processing')
+      AND EXISTS (
+          SELECT 1 FROM public.jobs j
+          WHERE j.org_id = p.org_id AND j.kind = 'tile_photo'
+            AND j.payload->>'photo_id' = p.id::text AND j.status = 'failed'
+      )
+    ORDER BY p.updated_at
     LIMIT least(greatest(p_limit, 1), 500)
 $$;
 
@@ -198,13 +239,15 @@ REVOKE ALL ON FUNCTION
     queue.jobs_claim(text, text[], integer),
     queue.jobs_complete(uuid, text),
     queue.jobs_fail(uuid, text, text, boolean, integer),
-    queue.abandoned_uploads(integer, integer)
+    queue.abandoned_uploads(integer, integer),
+    queue.stuck_photos(integer)
 FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION
     queue.jobs_claim(text, text[], integer),
     queue.jobs_complete(uuid, text),
     queue.jobs_fail(uuid, text, text, boolean, integer),
-    queue.abandoned_uploads(integer, integer)
+    queue.abandoned_uploads(integer, integer),
+    queue.stuck_photos(integer)
 TO {WORKER_ROLE};
 
 RESET ROLE;
@@ -215,7 +258,18 @@ REVOKE CREATE ON SCHEMA queue FROM {DISPATCHER_ROLE};
 
 DOWNGRADE = f"""
 DROP SCHEMA queue CASCADE;
-REVOKE ALL ON jobs, files FROM {DISPATCHER_ROLE};
+DROP POLICY files_worker_delete ON files;
+DROP INDEX files_cleanup_idx;
+-- An upload mid-completion goes back to pending. Forced RLS binds the owner, and
+-- there is no tenant context to set for every org at once, so it is lifted for
+-- this one statement.
+ALTER TABLE files NO FORCE ROW LEVEL SECURITY;
+UPDATE files SET status = 'pending' WHERE status = 'completing';
+ALTER TABLE files FORCE ROW LEVEL SECURITY;
+ALTER TABLE files DROP CONSTRAINT files_status_check;
+ALTER TABLE files ADD CONSTRAINT files_status_check
+    CHECK (status IN ('pending', 'ready', 'failed'));
+REVOKE ALL ON jobs, files, photos FROM {DISPATCHER_ROLE};
 REVOKE ALL ON files, photos, tiles, audit_events FROM {WORKER_ROLE};
 REVOKE EXECUTE ON FUNCTION app.org_id() FROM {WORKER_ROLE};
 REVOKE USAGE ON SCHEMA app FROM {WORKER_ROLE};

@@ -29,6 +29,13 @@ def insert_photo(connection: psycopg.Connection, tenant: Tenant, *, file_id=None
     return photo_id
 
 
+def tile_key_for(tenant: Tenant, photo_id, name: str | None = None) -> str:
+    return (
+        f"orgs/{tenant.org_id}/projects/{tenant.project_id}/photos/{photo_id}/tiles/"
+        f"{name or uuid4()}.jpg"
+    )
+
+
 def insert_tile(connection: psycopg.Connection, tenant: Tenant, photo_id) -> None:
     connection.execute(
         """
@@ -36,7 +43,7 @@ def insert_tile(connection: psycopg.Connection, tenant: Tenant, photo_id) -> Non
                            width, height, object_key)
         VALUES (%s, %s, 0, 0, 0, 640, 640, 1, 640, 640, %s)
         """,
-        (tenant.org_id, photo_id, f"orgs/{tenant.org_id}/projects/{tenant.project_id}/t/{uuid4()}"),
+        (tenant.org_id, photo_id, tile_key_for(tenant, photo_id)),
     )
 
 
@@ -137,22 +144,37 @@ def test_a_tile_scale_is_in_zero_to_one(owner_conn, scale):
                                width, height, object_key)
             VALUES (%s, %s, 0, 0, 0, 10, 10, %s, 10, 10, %s)
             """,
-            (TENANT_A.org_id, photo_id, scale, f"orgs/{TENANT_A.org_id}/x"),
+            (TENANT_A.org_id, photo_id, scale, tile_key_for(TENANT_A, photo_id)),
         )
 
 
-def test_a_tile_key_must_sit_inside_its_org(owner_conn):
+@pytest.mark.parametrize(
+    "key",
+    [
+        lambda photo: (
+            f"orgs/{TENANT_B.org_id}/projects/{TENANT_A.project_id}/photos/{photo}/tiles/a.jpg"
+        ),
+        lambda photo: (
+            f"orgs/{TENANT_A.org_id}/projects/{TENANT_A.project_id}/photos/{uuid4()}/tiles/a.jpg"
+        ),
+        lambda photo: (
+            f"orgs/{TENANT_A.org_id}/projects/{TENANT_A.project_id}/files/{TENANT_A.file_id}/original"
+        ),
+    ],
+    ids=["other-org", "other-photo", "an-original"],
+)
+def test_a_tile_key_must_sit_inside_its_own_org_and_photo(owner_conn, key):
     set_context(owner_conn, org_id=TENANT_A.org_id)
     photo_id = insert_photo(owner_conn, TENANT_A)
 
-    with pytest.raises(psycopg.errors.CheckViolation, match="tiles_object_key_in_org"):
+    with pytest.raises(psycopg.errors.CheckViolation, match="tiles_object_key_in_photo"):
         owner_conn.execute(
             """
             INSERT INTO tiles (org_id, photo_id, level, x, y, src_width, src_height, scale,
                                width, height, object_key)
             VALUES (%s, %s, 0, 0, 0, 10, 10, 1, 10, 10, %s)
             """,
-            (TENANT_A.org_id, photo_id, f"orgs/{TENANT_B.org_id}/x"),
+            (TENANT_A.org_id, photo_id, key(photo_id)),
         )
 
 
@@ -181,10 +203,15 @@ def test_a_payload_of_ids_is_accepted(owner_conn):
         {"photo_id": {"id": GOOD_ID}},
         {"photo_id": GOOD_ID, "note": "alice@example.test"},
         {"photo_id": GOOD_ID, "storage_key": "orgs/x/y"},
+        {"alice@example.test": GOOD_ID},
+        {"Photo_Id": GOOD_ID},
+        {"a" * 41: GOOD_ID},
+        {f"k{i}": GOOD_ID for i in range(15)},
     ],
     ids=[
         "word", "upper", "suffix", "number", "null", "bool",
         "array", "object", "extra-string", "extra-key",
+        "email-as-key", "upper-key", "long-key", "too-big",
     ],
 )  # fmt: skip
 def test_a_payload_with_anything_but_ids_is_rejected(owner_conn, payload):

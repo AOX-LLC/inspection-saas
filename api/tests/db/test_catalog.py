@@ -33,6 +33,7 @@ DEFINER_EXECUTE_GRANTEES = {
     "queue.jobs_complete(uuid,text)": {WORKER_ROLE},
     "queue.jobs_fail(uuid,text,text,boolean,integer)": {WORKER_ROLE},
     "queue.abandoned_uploads(integer,integer)": {WORKER_ROLE},
+    "queue.stuck_photos(integer)": {WORKER_ROLE},
 }
 
 # Global reference data (not tenant-owned) goes here, read-only for the app: a
@@ -690,6 +691,7 @@ def test_definer_functions_exist(app_conn):
         "queue.jobs_complete(uuid,text)",
         "queue.jobs_fail(uuid,text,text,boolean,integer)",
         "queue.abandoned_uploads(integer,integer)",
+        "queue.stuck_photos(integer)",
     }
 
 

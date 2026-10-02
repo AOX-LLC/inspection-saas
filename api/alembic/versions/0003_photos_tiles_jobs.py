@@ -38,6 +38,8 @@ _UUID_REGEX = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 PAYLOAD_VALUE_IS_NOT_AN_ID = (
     f'strict $.* ? (!(@.type() == "string" && @ like_regex "{_UUID_REGEX}"))'
 )
+# ...and any key that is not a short snake_case name, so a key cannot carry data either.
+PAYLOAD_KEY_IS_NOT_A_NAME = 'strict $.keyvalue() ? (!(@.key like_regex "^[a-z_]{1,40}$"))'
 
 UPGRADE = f"""
 -- The composite FK from photos needs a (org_id, id) key on files, as
@@ -89,7 +91,11 @@ CREATE TABLE tiles (
     CONSTRAINT tiles_object_key_key UNIQUE (object_key),
     CONSTRAINT tiles_photo_fkey FOREIGN KEY (org_id, photo_id)
         REFERENCES photos (org_id, id) ON DELETE CASCADE,
-    CONSTRAINT tiles_object_key_in_org CHECK (object_key LIKE 'orgs/' || org_id::text || '/%')
+    -- A tile's key is bound to its own org and photo, as a file's is to its own ids.
+    CONSTRAINT tiles_object_key_in_photo CHECK (
+        object_key LIKE 'orgs/' || org_id::text || '/projects/%/photos/' || photo_id::text
+            || '/tiles/%'
+    )
 );
 CREATE INDEX tiles_org_id_photo_id_idx ON tiles (org_id, photo_id);
 
@@ -98,10 +104,13 @@ CREATE TABLE jobs (
     org_id        uuid NOT NULL REFERENCES orgs (id) ON DELETE CASCADE,
     kind          text NOT NULL CHECK (kind IN ('tile_photo')),
     -- Ids only: the claim function returns this across tenants. Every value
-    -- must be a canonical lower-case UUID string. The path is strict: in lax
-    -- mode `$.*` would unwrap an array and judge its elements instead.
+    -- must be a canonical lower-case UUID string and every key a short
+    -- snake_case name. The paths are strict: in lax mode `$.*` would unwrap an
+    -- array and judge its elements instead.
     payload       jsonb NOT NULL DEFAULT '{{}}'::jsonb CHECK (
         jsonb_typeof(payload) = 'object'
+        AND length(payload::text) <= 500
+        AND NOT jsonb_path_exists(payload, '{PAYLOAD_KEY_IS_NOT_A_NAME}')
         AND NOT jsonb_path_exists(
             payload,
             '{PAYLOAD_VALUE_IS_NOT_AN_ID}'
