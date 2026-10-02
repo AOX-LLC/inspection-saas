@@ -29,6 +29,7 @@ from app.config import get_settings
 from app.db.tenant import tenant_transaction
 from app.deps import ObjectStoreDep, SessionFactoryDep
 from app.orgs.access import MemberAccess, WriterAccess
+from app.photos.service import register_photo
 from app.storage.content_types import ALLOWED_CONTENT_TYPES, detect_content_type
 from app.storage.keys import assert_key_in_org, original_key, staging_key
 from app.storage.s3 import ObjectChanged, ObjectInfo, ObjectStore
@@ -287,6 +288,12 @@ async def complete_upload(
             target_id=file_id,
             detail={"size_bytes": info.size_bytes},
         )
+        if accepted:
+            # Same transaction as the status change: a ready file always has a
+            # photo and a tiling job, and a failed commit leaves neither.
+            await register_photo(
+                session, org_id=access.org_id, project_id=project_id, file_id=file_id
+            )
     # The staged bytes are never kept. A leftover from a write that landed after
     # this point is removed by the worker's cleanup.
     await asyncio.to_thread(store.delete, staging)

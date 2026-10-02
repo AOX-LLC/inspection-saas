@@ -211,3 +211,15 @@ def as_auth_role(sql: str, params: tuple = ()) -> list[tuple]:
         connection.execute("SET LOCAL ROLE inspection_auth")
         cursor = connection.execute(sql, params)
         return cursor.fetchall() if cursor.description else []
+
+
+@pytest.fixture
+def cleanup() -> Iterator[list[str]]:
+    """Original keys a test created; each is deleted with its staging sibling afterwards."""
+    keys: list[str] = []
+    yield keys
+    store = ObjectStore(get_settings())
+    for key in keys:
+        store.delete(key)
+        # The sibling a presigned POST targets before `complete` promotes it.
+        store.delete(key.removesuffix("/original") + "/upload")

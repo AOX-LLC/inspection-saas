@@ -49,17 +49,6 @@ async def fetch(url: str) -> httpx.Response:
         return await http.get(url)
 
 
-@pytest.fixture
-def cleanup():
-    keys: list[str] = []
-    yield keys
-    store = ObjectStore(get_settings())
-    for key in keys:
-        store.delete(key)
-        # The sibling a presigned POST targets before `complete` promotes it.
-        store.delete(key.removesuffix("/original") + "/upload")
-
-
 def audit_actions(org_id: UUID) -> list[str]:
     with psycopg.connect(owner_conninfo(), autocommit=True) as connection, connection.transaction():
         set_context(connection, org_id=org_id)

@@ -1,4 +1,4 @@
-"""FastAPI application: health, auth, projects and file transfer."""
+"""FastAPI application: health, auth, projects, file transfer and batch progress."""
 
 import logging
 from collections.abc import AsyncGenerator
@@ -16,6 +16,7 @@ from app.config import AppEnv, get_settings
 from app.db.engine import create_engine, create_session_factory
 from app.files.router import router as files_router
 from app.http_security import protect
+from app.photos.router import router as photos_router
 from app.projects.router import router as projects_router
 from app.storage.s3 import ObjectStore
 
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(projects_router)
     app.include_router(files_router)
+    app.include_router(photos_router)
     return app
 
 
