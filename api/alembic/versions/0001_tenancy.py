@@ -150,6 +150,13 @@ CREATE TABLE files (
     uploaded_by        uuid REFERENCES users (id) ON DELETE SET NULL,
     created_at         timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT files_object_key_key UNIQUE (object_key),
+    -- The storage key is a pointer into another system. Binding it to the
+    -- row's own ids stops a row from pointing at, or squatting, another
+    -- org's objects.
+    CONSTRAINT files_object_key_in_org CHECK (
+        object_key LIKE 'orgs/' || org_id::text || '/projects/' || project_id::text
+            || '/files/' || id::text || '/%'
+    ),
     CONSTRAINT files_project_fkey FOREIGN KEY (org_id, project_id)
         REFERENCES projects (org_id, id) ON DELETE CASCADE
 );
