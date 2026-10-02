@@ -1,4 +1,4 @@
-"""FastAPI application: health and auth."""
+"""FastAPI application: health, auth, projects and file transfer."""
 
 import logging
 from collections.abc import AsyncGenerator
@@ -13,7 +13,9 @@ from app.auth.ratelimit import LoginRateLimiter
 from app.auth.router import router as auth_router
 from app.config import AppEnv, get_settings
 from app.db.engine import create_engine, create_session_factory
+from app.files.router import router as files_router
 from app.http_security import protect
+from app.projects.router import router as projects_router
 from app.storage.s3 import ObjectStore
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,8 @@ def create_app() -> FastAPI:
     app.middleware("http")(protect)
     app.add_api_route("/health", health, methods=["GET"], include_in_schema=False)
     app.include_router(auth_router)
+    app.include_router(projects_router)
+    app.include_router(files_router)
     return app
 
 
