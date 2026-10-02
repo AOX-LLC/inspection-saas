@@ -173,6 +173,36 @@ services:
       retries: 20
       start_period: 5s
 
+  # Background jobs: tiling now, and later the model pass and reports. The same
+  # image as the API, run as the worker role. It decodes whole photos, so its
+  # memory limit is the largest of the application services.
+  worker:
+    mem_limit: 768m
+    <<: *hardening
+    build: *api-build
+    image: *api-image
+    user: "10006:10006"
+    group_add: ["10005"]
+    command: ["python", "-m", "app.worker"]
+    # Time to finish the job in hand after SIGTERM before it is killed.
+    stop_grace_period: 30s
+    environment:
+      APP_ENV: demo
+      MODEL_MODE: ${MODEL_MODE:-mock}
+    volumes:
+      - secrets:/run/inspection-secrets:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      objectstore-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
   test:
     mem_limit: 512m
     <<: *hardening

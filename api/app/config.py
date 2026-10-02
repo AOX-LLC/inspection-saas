@@ -8,6 +8,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
@@ -61,6 +62,39 @@ class Settings(BaseSettings):
     s3_secret_access_key_file: Path = Path("/run/inspection-secrets/storage/s3_secret_access_key")
     presign_ttl_seconds: int = 300
     max_upload_bytes: int = 50 * 1024 * 1024
+
+    # Tiling. A tile is cut at the detector's input size, so a tile of
+    # `tile_size` pixels needs no resizing before inference. Neighbouring tiles
+    # overlap so a defect cut by one tile's edge is whole in the next.
+    tile_size: int = Field(default=640, ge=64, le=4096)
+    tile_overlap: int = Field(default=128, ge=0)
+    tile_jpeg_quality: int = Field(default=85, ge=1, le=100)
+    # The largest decoded image the worker will open, in pixels, and the most
+    # tiles it will cut from one photo. Together they bound memory and time for
+    # a hostile or pathological file.
+    max_image_pixels: int = Field(default=50_000_000, ge=1)
+    max_tiles_per_photo: int = Field(default=512, ge=1)
+
+    # The worker. One job at a time by default: decoding a large photo is the
+    # memory-heavy step, and the container has a memory limit.
+    worker_concurrency: int = Field(default=1, ge=1, le=8)
+    # How long a claimed job stays locked before another worker may take it.
+    job_lock_seconds: int = Field(default=300, ge=10)
+    # The wait before a failed job's second attempt; it doubles each attempt.
+    job_backoff_seconds: int = Field(default=5, ge=1)
+    # The fallback when no NOTIFY arrives.
+    worker_poll_seconds: float = Field(default=5.0, gt=0)
+    worker_heartbeat_file: Path = Path("/tmp/worker-alive")  # noqa: S108 (a tmpfs in the container)
+    cleanup_interval_seconds: int = Field(default=300, ge=1)
+    # An upload started this long ago and never completed is abandoned.
+    abandoned_upload_seconds: int = Field(default=3600, ge=900)
+    session_purge_grace_seconds: int = Field(default=24 * 60 * 60, ge=60)
+
+    @model_validator(mode="after")
+    def _overlap_leaves_a_stride(self) -> "Settings":
+        if self.tile_overlap >= self.tile_size:
+            raise ValueError("TILE_OVERLAP must be smaller than TILE_SIZE")
+        return self
 
     @property
     def origins(self) -> frozenset[str]:
