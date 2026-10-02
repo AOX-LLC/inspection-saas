@@ -40,6 +40,24 @@ class Settings(BaseSettings):
     db_owner_user: str = "inspection_owner"
     db_owner_password_file: Path = Path("/run/inspection-secrets/owner/owner_password")
 
+    # Browser origins allowed to make state-changing requests. Comma-separated.
+    allowed_origins: str = "http://127.0.0.1:4700,http://localhost:4700"
+
+    # Object store. Operations use the internal endpoint; presigned URLs are
+    # signed for the public one, which is what the browser can reach.
+    s3_endpoint: str = "http://objectstore:3900"
+    s3_public_endpoint: str = "http://127.0.0.1:4703"
+    s3_region: str = "garage"
+    s3_bucket: str = "inspection-uploads"
+    s3_access_key_id_file: Path = Path("/run/inspection-secrets/storage/s3_access_key_id")
+    s3_secret_access_key_file: Path = Path("/run/inspection-secrets/storage/s3_secret_access_key")
+    presign_ttl_seconds: int = 300
+    max_upload_bytes: int = 50 * 1024 * 1024
+
+    @property
+    def origins(self) -> frozenset[str]:
+        return frozenset(o.strip() for o in self.allowed_origins.split(",") if o.strip())
+
     def app_database_url(self) -> URL:
         return self._database_url(self.db_app_user, self.db_app_password_file)
 
