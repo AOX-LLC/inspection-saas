@@ -59,6 +59,11 @@ CREATE INDEX files_cleanup_idx ON files (created_at)
     WHERE status IN ('pending', 'completing')
        OR (status IN ('ready', 'failed') AND staging_swept_at IS NULL);
 
+-- Serve queue.stuck_photos: photos still waiting or running, and failed jobs by photo.
+CREATE INDEX photos_unfinished_idx ON photos (updated_at) WHERE status IN ('queued', 'processing');
+CREATE INDEX jobs_failed_photo_idx ON jobs (org_id, (payload->>'photo_id'))
+    WHERE kind = 'tile_photo' AND status = 'failed';
+
 -- The worker -------------------------------------------------------------------
 
 GRANT USAGE ON SCHEMA app TO {WORKER_ROLE};
@@ -259,7 +264,7 @@ REVOKE CREATE ON SCHEMA queue FROM {DISPATCHER_ROLE};
 DOWNGRADE = f"""
 DROP SCHEMA queue CASCADE;
 DROP POLICY files_worker_delete ON files;
-DROP INDEX files_cleanup_idx;
+DROP INDEX files_cleanup_idx, photos_unfinished_idx, jobs_failed_photo_idx;
 -- An upload mid-completion goes back to pending. Forced RLS binds the owner, and
 -- there is no tenant context to set for every org at once, so it is lifted for
 -- this one statement.
