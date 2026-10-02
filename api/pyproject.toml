@@ -1,0 +1,45 @@
+[project]
+name = "inspection-api"
+version = "0.1.0"
+description = "API for the visual defect inspection app"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+dependencies = [
+    "alembic>=1.20.0",
+    "fastapi>=0.142.2",
+    "psycopg[binary]>=3.3.6",
+    "pydantic-settings>=2.15.0",
+    "sqlalchemy[asyncio]>=2.1.2",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.10",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Migrations and tests interpolate only module constants into SQL.
+"alembic/versions/**" = ["S608"]
+"tests/**" = ["S101", "S105", "S106", "S608"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+# The test container has a read-only filesystem, so no cache directory.
+addopts = "-ra --strict-markers -p no:cacheprovider"
