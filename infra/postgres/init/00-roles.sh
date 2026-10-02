@@ -14,6 +14,8 @@ set -euo pipefail
 SECRETS_DIR=/run/inspection-secrets/db
 
 psql -v ON_ERROR_STOP=1 --no-psqlrc --username "$POSTGRES_USER" --dbname postgres <<SQL
+-- CREATE ROLE carries the passwords; if it fails, keep the statement out of the log.
+SET log_min_error_statement = panic;
 \set owner_password \`cat $SECRETS_DIR/owner_password\`
 \set app_password \`cat $SECRETS_DIR/app_password\`
 
