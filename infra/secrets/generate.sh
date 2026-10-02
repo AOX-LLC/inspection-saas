@@ -8,6 +8,8 @@
 #   owner/  gid 10002 migrate and seed: the owner role's password
 # Existing files are kept, so credentials survive restarts. `down -v` resets them.
 set -eu
+# Nothing this script creates is readable by others, even before lock_down.
+umask 077
 
 SECRETS_DIR=/secrets
 
@@ -18,7 +20,6 @@ new_password() {
 write_once() {
   file=$1
   if [ ! -s "$file" ]; then
-    umask 077
     new_password > "$file"
   fi
 }
