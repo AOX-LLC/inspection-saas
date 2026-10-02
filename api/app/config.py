@@ -26,7 +26,8 @@ class ModelMode(StrEnum):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(frozen=True)
 
-    app_env: AppEnv = AppEnv.DEMO
+    # Fails closed: demo-only behaviour (seeding, API docs) needs an explicit opt-in.
+    app_env: AppEnv = AppEnv.PRODUCTION
     model_mode: ModelMode = ModelMode.MOCK
 
     db_host: str = "db"

@@ -9,9 +9,13 @@ from app.seed import __main__ as seed_main
 from app.seed.data import MEMBERSHIPS, ORGS, PROJECTS, USERS
 
 
-@pytest.fixture
-def non_demo_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setenv("APP_ENV", "test")
+@pytest.fixture(params=["test", "production", None], ids=["test", "production", "unset"])
+def non_demo_env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    # Unset matters most: a missing APP_ENV must not count as demo.
+    if request.param is None:
+        monkeypatch.delenv("APP_ENV", raising=False)
+    else:
+        monkeypatch.setenv("APP_ENV", request.param)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
