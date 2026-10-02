@@ -113,6 +113,19 @@ class ObjectStore:
             ExpiresIn=_clamp_ttl(ttl_seconds),
         )
 
+    def presign_thumbnail(self, key: str, ttl_seconds: int) -> str:
+        """A GET URL for a thumbnail, shown inline; type and disposition are signed in."""
+        return self._signing.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": self._bucket,
+                "Key": key,
+                "ResponseContentType": "image/jpeg",
+                "ResponseContentDisposition": "inline",
+            },
+            ExpiresIn=_clamp_ttl(ttl_seconds),
+        )
+
     def inspect(self, key: str) -> ObjectInfo | None:
         """Size and leading bytes of an object, or None if it does not exist."""
         try:
