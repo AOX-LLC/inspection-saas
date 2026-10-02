@@ -24,7 +24,7 @@ Prerequisite: Docker Engine with Compose v2.
 docker compose up -d --wait
 ```
 
-Then open <http://127.0.0.1:4700> and sign in as one of the demo accounts the page lists (the list appears only in demo mode, which is what Compose runs).
+Then open <http://127.0.0.1:4700> (that exact address: the API and the object store accept requests from it and no other origin, so `localhost` will not work unless you add it to `ALLOWED_ORIGINS`) and sign in as one of the demo accounts the page lists (the list appears only in demo mode, which is what Compose runs).
 
 The first run builds the API and web images (the web build is a Next.js production build and takes a minute and a good half gigabyte of memory), generates credentials, creates the databases, starts the object store, migrates and seeds. If you ran an earlier phase on this machine, run `docker compose down -v` first: new database roles and secrets are only created on a fresh volume.
 

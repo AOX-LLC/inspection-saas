@@ -100,7 +100,12 @@ built on the host.
   reverse proxy whose address is listed in `TRUSTED_PROXIES`, are told apart.
   The per-email limit remains the real brake.
 - A thumbnail link is valid for 15 minutes. A grid left open refreshes its links
-  every 10 minutes and again if an image fails to load.
+  every 10 minutes and again if an image fails to load; a refresh starts again from
+  the newest page, so older pages that were opened are closed and fetched again on request.
+- The rewrite forwards only `/api/auth`, `/api/orgs` and `/api/health`. The API's
+  interactive docs stay on the API's own port, because served from the web origin they
+  would load third-party script on an origin the API trusts. The web service answers
+  `/healthz` for itself, with the build's revision when `APP_COMMIT` is set.
 - Photos tiled before thumbnails existed have no `thumb_key` and show a
   "Preview unavailable" tile. Nothing backfills them yet.
 - Thumbnail presigns are not written to the audit log (they are many, small and
