@@ -18,12 +18,12 @@ MAX_PAGE_SIZE = 100
 
 _LIST = text(
     """
-    SELECT id, name, created_at FROM projects
+    SELECT id, name, created_at FROM projects WHERE org_id = :org_id
     ORDER BY created_at, id
     LIMIT :limit OFFSET :offset
     """
 )
-_GET = text("SELECT id, name, created_at FROM projects WHERE id = :project_id")
+_GET = text("SELECT id, name, created_at FROM projects WHERE id = :project_id AND org_id = :org_id")
 
 
 class ProjectOut(BaseModel):
@@ -46,7 +46,11 @@ async def list_projects(
 ) -> ProjectPage:
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
         # One extra row says whether another page exists.
-        rows = (await session.execute(_LIST, {"limit": limit + 1, "offset": offset})).all()
+        rows = (
+            await session.execute(
+                _LIST, {"org_id": access.org_id, "limit": limit + 1, "offset": offset}
+            )
+        ).all()
     return ProjectPage(
         items=[ProjectOut(id=r.id, name=r.name, created_at=r.created_at) for r in rows[:limit]],
         has_more=len(rows) > limit,
@@ -60,7 +64,9 @@ async def get_project(
     factory: SessionFactoryDep,
 ) -> ProjectOut:
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
-        row = (await session.execute(_GET, {"project_id": project_id})).first()
+        row = (
+            await session.execute(_GET, {"project_id": project_id, "org_id": access.org_id})
+        ).first()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     return ProjectOut(id=row.id, name=row.name, created_at=row.created_at)

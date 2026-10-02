@@ -75,8 +75,11 @@ changing configuration, not call sites.
   stored in the database, so the replacement cannot change how the file is
   served, but the bytes could differ from what was checked. Closing this needs
   a server-side copy on completion; it is not built.
-- **Rejected and abandoned uploads.** Rejected objects are deleted. A `pending`
-  row that is never completed stays until a cleanup job exists.
+- **Rejected and abandoned uploads.** Rejected objects are deleted, but the same
+  POST can still be replayed inside its window. A `pending` row that is never
+  completed stays until a cleanup job exists; an org may hold at most 100 at once.
+  There is no per-user quota or storage limit: Garage's capacity setting is a
+  placement weight, not a quota.
 - **Not verified here:** behaviour behind a public hostname or TLS terminator
   (signatures bind to the host, so `S3_PUBLIC_ENDPOINT` must match what the
   browser uses), and behaviour under concurrent load.

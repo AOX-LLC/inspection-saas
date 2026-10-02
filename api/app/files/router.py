@@ -11,6 +11,7 @@ database, whatever the object's own metadata says, plus Content-Disposition.
 import asyncio
 import logging
 import re
+import unicodedata
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -32,13 +33,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/orgs/{org_id}/projects/{project_id}/files", tags=["files"])
 
 MAX_PAGE_SIZE = 100
-_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+# Pending uploads an org may hold at once; bounds what abandoned uploads can cost.
+MAX_PENDING_UPLOADS = 100
 
-_PROJECT_EXISTS = text("SELECT 1 FROM projects WHERE id = :project_id")
+_PROJECT_EXISTS = text("SELECT 1 FROM projects WHERE id = :project_id AND org_id = :org_id")
+_PENDING_COUNT = text("SELECT count(*) FROM files WHERE org_id = :org_id AND status = 'pending'")
 _LIST = text(
     """
     SELECT id, content_type, size_bytes, status, original_filename, created_at
-    FROM files WHERE project_id = :project_id
+    FROM files WHERE project_id = :project_id AND org_id = :org_id
     ORDER BY created_at, id
     LIMIT :limit OFFSET :offset
     """
@@ -54,13 +57,13 @@ _INSERT = text(
 _GET = text(
     """
     SELECT id, object_key, content_type, size_bytes, status
-    FROM files WHERE id = :file_id AND project_id = :project_id
+    FROM files WHERE id = :file_id AND project_id = :project_id AND org_id = :org_id
     """
 )
 _FINISH = text(
     """
     UPDATE files SET status = :status, size_bytes = :size_bytes
-    WHERE id = :file_id AND project_id = :project_id AND status = 'pending'
+    WHERE id = :file_id AND project_id = :project_id AND org_id = :org_id AND status = 'pending'
     RETURNING id, content_type, size_bytes, status, original_filename, created_at
     """
 )
@@ -121,12 +124,15 @@ def _not_found() -> HTTPException:
 
 def _clean_filename(name: str) -> str:
     """Display metadata only. It never reaches a key, a header or a path."""
-    base = re.split(r"[\\/]", _CONTROL_CHARACTERS.sub("", name))[-1].strip()
+    # Control and format characters (including bidi overrides) never reach metadata.
+    printable = "".join(c for c in name if unicodedata.category(c) not in {"Cc", "Cf"})
+    base = re.split(r"[\\/]", printable)[-1].strip()
     return base[:255] or "upload"
 
 
-async def _require_project(session: AsyncSession, project_id: UUID) -> None:
-    if (await session.execute(_PROJECT_EXISTS, {"project_id": project_id})).first() is None:
+async def _require_project(session: AsyncSession, org_id: UUID, project_id: UUID) -> None:
+    params = {"project_id": project_id, "org_id": org_id}
+    if (await session.execute(_PROJECT_EXISTS, params)).first() is None:
         raise _not_found()
 
 
@@ -139,10 +145,16 @@ async def list_files(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> FilePage:
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
-        await _require_project(session, project_id)
+        await _require_project(session, access.org_id, project_id)
         rows = (
             await session.execute(
-                _LIST, {"project_id": project_id, "limit": limit + 1, "offset": offset}
+                _LIST,
+                {
+                    "project_id": project_id,
+                    "org_id": access.org_id,
+                    "limit": limit + 1,
+                    "offset": offset,
+                },
             )
         ).all()
     return FilePage(
@@ -173,7 +185,13 @@ async def create_upload(
     file_id = uuid4()
     key = original_key(access.org_id, project_id, file_id)
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
-        await _require_project(session, project_id)
+        await _require_project(session, access.org_id, project_id)
+        pending = (await session.execute(_PENDING_COUNT, {"org_id": access.org_id})).scalar_one()
+        if pending >= MAX_PENDING_UPLOADS:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many unfinished uploads. Complete or wait for them to expire.",
+            )
         await session.execute(
             _INSERT,
             {
@@ -215,12 +233,21 @@ async def complete_upload(
     store: ObjectStoreDep,
 ) -> FileOut:
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
-        row = (await session.execute(_GET, {"file_id": file_id, "project_id": project_id})).first()
+        row = (
+            await session.execute(
+                _GET, {"file_id": file_id, "project_id": project_id, "org_id": access.org_id}
+            )
+        ).first()
     if row is None:
         raise _not_found()
     if row.status != "pending":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Upload already finished")
-    assert_key_in_org(row.object_key, access.org_id)
+    try:
+        assert_key_in_org(row.object_key, access.org_id)
+    except ValueError:
+        # The database constraint should make this impossible.
+        logger.error("file row has a key outside its org", extra={"file_id": str(file_id)})
+        raise _not_found() from None
 
     # The database transaction is closed while the store is asked about the object.
     info = await asyncio.to_thread(store.inspect, row.object_key)
@@ -241,6 +268,7 @@ async def complete_upload(
                 {
                     "file_id": file_id,
                     "project_id": project_id,
+                    "org_id": access.org_id,
                     "status": "ready" if accepted else "failed",
                     "size_bytes": info.size_bytes,
                 },
@@ -277,7 +305,11 @@ async def download(
 ) -> DownloadOut:
     settings = get_settings()
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
-        row = (await session.execute(_GET, {"file_id": file_id, "project_id": project_id})).first()
+        row = (
+            await session.execute(
+                _GET, {"file_id": file_id, "project_id": project_id, "org_id": access.org_id}
+            )
+        ).first()
         if row is None:
             raise _not_found()
         if row.status != "ready":

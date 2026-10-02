@@ -253,6 +253,50 @@ async def test_oversized_declarations_are_refused(signed_in, world: World):
     assert zero.status_code == 422
 
 
+async def test_unfinished_uploads_are_capped_per_org(signed_in, world: World, monkeypatch, cleanup):
+    from app.files import router
+
+    client = await signed_in(world.alpha.inspector)
+    pending = await _count_pending(world.alpha.id)
+    monkeypatch.setattr(router, "MAX_PENDING_UPLOADS", pending + 1)
+
+    first = await create_upload(client, world.alpha.id, world.alpha.project_id)
+    second = await create_upload(client, world.alpha.id, world.alpha.project_id)
+
+    cleanup.append(
+        original_key(world.alpha.id, world.alpha.project_id, UUID(first.json()["file_id"]))
+    )
+    assert first.status_code == 201
+    assert second.status_code == 429
+    # Another org is unaffected.
+    other = await signed_in(world.beta.inspector)
+    ok = await create_upload(other, world.beta.id, world.beta.project_id)
+    cleanup.append(original_key(world.beta.id, world.beta.project_id, UUID(ok.json()["file_id"])))
+    assert ok.status_code == 201
+
+
+async def _count_pending(org_id: UUID) -> int:
+    with psycopg.connect(owner_conninfo(), autocommit=True) as connection, connection.transaction():
+        set_context(connection, org_id=org_id)
+        return connection.execute("SELECT count(*) FROM files WHERE status = 'pending'").fetchone()[
+            0
+        ]
+
+
+async def test_filenames_lose_control_and_bidi_characters(signed_in, world: World, cleanup):
+    client = await signed_in(world.alpha.inspector)
+
+    response = await create_upload(
+        client, world.alpha.id, world.alpha.project_id, name="a\u202egnp.exe\u200b\x85.png"
+    )
+
+    file_id = UUID(response.json()["file_id"])
+    cleanup.append(original_key(world.alpha.id, world.alpha.project_id, file_id))
+    listing = await client.get(files_url(world.alpha.id, world.alpha.project_id))
+    stored = next(i for i in listing.json()["items"] if i["id"] == str(file_id))
+    assert stored["original_filename"] == "agnp.exe.png"
+
+
 async def test_the_client_filename_never_reaches_the_key(signed_in, world: World, cleanup):
     client = await signed_in(world.alpha.inspector)
 
