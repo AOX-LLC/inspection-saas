@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from app.config import get_settings
-from app.storage.keys import original_key
+from app.storage.keys import original_key, staging_key
 from app.storage.s3 import ObjectStore
 from tests.api.conftest import World
 from tests.db.conftest import owner_conninfo, set_context
@@ -56,6 +56,8 @@ def cleanup():
     store = ObjectStore(get_settings())
     for key in keys:
         store.delete(key)
+        # The sibling a presigned POST targets before `complete` promotes it.
+        store.delete(key.removesuffix("/original") + "/upload")
 
 
 def audit_actions(org_id: UUID) -> list[str]:
@@ -309,7 +311,9 @@ async def test_the_client_filename_never_reaches_the_key(signed_in, world: World
     file_id = UUID(upload["file_id"])
     key = original_key(world.alpha.id, world.alpha.project_id, file_id)
     cleanup.append(key)
-    assert upload["upload"]["fields"]["key"] == key
+    assert upload["upload"]["fields"]["key"] == staging_key(
+        world.alpha.id, world.alpha.project_id, file_id
+    )
     listing = await client.get(files_url(world.alpha.id, world.alpha.project_id))
     stored_name = next(i for i in listing.json()["items"] if i["id"] == str(file_id))[
         "original_filename"
@@ -376,7 +380,9 @@ async def test_complete_checks_the_magic_bytes(signed_in, world: World, declared
     assert done.status_code == 422
     listing = await client.get(files_url(world.alpha.id, world.alpha.project_id))
     assert next(i for i in listing.json()["items"] if i["id"] == str(file_id))["status"] == "failed"
-    assert ObjectStore(get_settings()).inspect(key) is None  # rejected bytes are removed
+    store = ObjectStore(get_settings())
+    assert store.inspect(key) is None  # rejected bytes are removed
+    assert store.inspect(staging_key(world.alpha.id, world.alpha.project_id, file_id)) is None
     link = await client.get(
         f"{files_url(world.alpha.id, world.alpha.project_id)}/{file_id}/download"
     )
@@ -429,3 +435,99 @@ async def test_downloads_force_the_stored_type_whatever_the_object_says(signed_i
 
     assert fetched.headers["content-type"] == "image/jpeg"
     assert fetched.headers["content-disposition"].startswith("attachment;")
+
+
+# The staging key ------------------------------------------------------------------
+
+
+async def _finished_upload(client, world: World, body: bytes, cleanup) -> tuple[dict, UUID]:
+    start = await create_upload(client, world.alpha.id, world.alpha.project_id, size=len(body))
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    cleanup.append(original_key(world.alpha.id, world.alpha.project_id, file_id))
+    assert (await send_to_store(upload, body)).status_code in (200, 201, 204)
+    done = await client.post(
+        f"{files_url(world.alpha.id, world.alpha.project_id)}/{file_id}/complete"
+    )
+    assert done.status_code == 200, done.text
+    return upload, file_id
+
+
+async def test_the_presigned_post_never_targets_the_final_key(signed_in, world: World, cleanup):
+    client = await signed_in(world.alpha.inspector)
+    start = await create_upload(client, world.alpha.id, world.alpha.project_id)
+    file_id = UUID(start.json()["file_id"])
+    cleanup.append(original_key(world.alpha.id, world.alpha.project_id, file_id))
+
+    key = start.json()["upload"]["fields"]["key"]
+
+    assert key == staging_key(world.alpha.id, world.alpha.project_id, file_id)
+    assert key != original_key(world.alpha.id, world.alpha.project_id, file_id)
+
+
+async def test_a_finished_upload_cannot_be_overwritten_through_its_post(
+    signed_in, world: World, cleanup
+):
+    """The presigned POST outlives `complete` by minutes; the final object must not move."""
+    client = await signed_in(world.alpha.inspector)
+    png = image_bytes("PNG")
+    upload, file_id = await _finished_upload(client, world, png, cleanup)
+
+    replay = await send_to_store(upload, b"\x89PNG\r\n\x1a\n" + b"X" * 50)
+
+    assert replay.status_code in (200, 201, 204)  # the store still honours its own policy
+    link = await client.get(
+        f"{files_url(world.alpha.id, world.alpha.project_id)}/{file_id}/download"
+    )
+    assert (await fetch(link.json()["url"])).content == png
+
+
+async def test_complete_removes_the_staged_object(signed_in, world: World, cleanup):
+    client = await signed_in(world.alpha.inspector)
+    _, file_id = await _finished_upload(client, world, image_bytes("PNG"), cleanup)
+
+    store = ObjectStore(get_settings())
+
+    assert store.inspect(staging_key(world.alpha.id, world.alpha.project_id, file_id)) is None
+    assert store.inspect(original_key(world.alpha.id, world.alpha.project_id, file_id)) is not None
+
+
+async def test_the_final_object_carries_the_database_content_type(signed_in, world: World, cleanup):
+    client = await signed_in(world.alpha.inspector)
+    _, file_id = await _finished_upload(client, world, image_bytes("PNG"), cleanup)
+
+    key = original_key(world.alpha.id, world.alpha.project_id, file_id)
+    head = ObjectStore(get_settings())._operations.head_object(
+        Bucket=get_settings().s3_bucket, Key=key
+    )
+
+    assert head["ContentType"] == "image/png"
+
+
+async def test_a_swap_after_the_check_is_caught_on_the_copy(
+    signed_in, world: World, cleanup, monkeypatch
+):
+    """If the bytes that land at the final key are not an image, the upload fails."""
+    client = await signed_in(world.alpha.inspector)
+    body = image_bytes("PNG")
+    start = await create_upload(client, world.alpha.id, world.alpha.project_id, size=len(body))
+    upload = start.json()
+    file_id = UUID(upload["file_id"])
+    key = original_key(world.alpha.id, world.alpha.project_id, file_id)
+    cleanup.append(key)
+    assert (await send_to_store(upload, body)).status_code in (200, 201, 204)
+
+    def hostile_copy(self, source, target, *, content_type, if_match):
+        # As if the staged object had been swapped between check and copy and the
+        # store's precondition had not caught it.
+        self.put(target, b"<html>not an image</html>", content_type)
+
+    monkeypatch.setattr(ObjectStore, "copy", hostile_copy)
+    done = await client.post(
+        f"{files_url(world.alpha.id, world.alpha.project_id)}/{file_id}/complete"
+    )
+
+    assert done.status_code == 422
+    store = ObjectStore(get_settings())
+    assert store.inspect(key) is None
+    assert store.inspect(staging_key(world.alpha.id, world.alpha.project_id, file_id)) is None

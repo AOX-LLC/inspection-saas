@@ -1,9 +1,12 @@
 """Upload and download of project files. The API presigns; it never proxies bytes.
 
 Upload is three steps. `POST` creates a pending row and returns a presigned
-POST whose policy pins the key, the declared content type and the declared
-size. The client uploads straight to the object store. `complete` then checks
-the stored object's size and magic bytes and only then marks the row ready.
+POST whose policy pins a staging key, the declared content type and the
+declared size. The client uploads straight to the object store. `complete`
+checks the staged object's size and magic bytes, copies it server-side to the
+final key, checks the copy again, and only then marks the row ready. The
+presigned POST never targets the final key, so a finished upload cannot be
+overwritten inside the POST's expiry window.
 Download signs a short-lived GET that forces the content type stored in the
 database, whatever the object's own metadata says, plus Content-Disposition.
 """
@@ -27,7 +30,8 @@ from app.db.tenant import tenant_transaction
 from app.deps import ObjectStoreDep, SessionFactoryDep
 from app.orgs.access import MemberAccess, WriterAccess
 from app.storage.content_types import ALLOWED_CONTENT_TYPES, detect_content_type
-from app.storage.keys import assert_key_in_org, original_key
+from app.storage.keys import assert_key_in_org, original_key, staging_key
+from app.storage.s3 import ObjectChanged, ObjectInfo, ObjectStore
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/orgs/{org_id}/projects/{project_id}/files", tags=["files"])
@@ -184,6 +188,7 @@ async def create_upload(
 
     file_id = uuid4()
     key = original_key(access.org_id, project_id, file_id)
+    staging = staging_key(access.org_id, project_id, file_id)
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
         await _require_project(session, access.org_id, project_id)
         pending = (await session.execute(_PENDING_COUNT, {"org_id": access.org_id})).scalar_one()
@@ -215,7 +220,7 @@ async def create_upload(
             detail={"content_type": body.content_type, "size_bytes": body.size_bytes},
         )
         post = store.presign_upload(
-            key, body.content_type, body.size_bytes, settings.presign_ttl_seconds
+            staging, body.content_type, body.size_bytes, settings.presign_ttl_seconds
         )
     return UploadOut(
         file_id=file_id,
@@ -250,15 +255,10 @@ async def complete_upload(
         raise _not_found() from None
 
     # The database transaction is closed while the store is asked about the object.
-    info = await asyncio.to_thread(store.inspect, row.object_key)
-    if info is None:
+    staging = staging_key(access.org_id, project_id, file_id)
+    info, problem = await asyncio.to_thread(_promote, store, row, staging)
+    if info is None and problem is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Upload not found")
-
-    problem = None
-    if info.size_bytes > row.size_bytes:
-        problem = "File is larger than declared"
-    elif detect_content_type(info.head) != row.content_type:
-        problem = "File content does not match the declared type"
 
     accepted = problem is None
     async with tenant_transaction(factory, org_id=access.org_id, user_id=access.user_id) as session:
@@ -287,12 +287,47 @@ async def complete_upload(
             target_id=file_id,
             detail={"size_bytes": info.size_bytes},
         )
+    # The staged bytes are never kept. A leftover from a write that landed after
+    # this point is removed by the worker's cleanup.
+    await asyncio.to_thread(store.delete, staging)
     if not accepted:
-        # Rejected bytes are not kept.
         await asyncio.to_thread(store.delete, row.object_key)
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=problem)
 
     return _file_out(finished)
+
+
+def _promote(store: ObjectStore, row: Row, staging: str) -> tuple[ObjectInfo | None, str | None]:
+    """Check the staged object, copy it to its final key and check the copy.
+
+    Returns (info, problem). `info` is None when nothing was staged. The final
+    key is never a POST target, so what the second check reads is stable; the
+    first check is why a bad object is never copied, the etag pin and the
+    second check are why a swap between the two is caught.
+    """
+    staged = store.inspect(staging)
+    if staged is None:
+        return None, None
+    problem = _content_problem(staged, row)
+    if problem is not None:
+        return staged, problem
+    try:
+        store.copy(staging, row.object_key, content_type=row.content_type, if_match=staged.etag)
+    except ObjectChanged:
+        return staged, "Upload changed while it was being checked"
+    final = store.inspect(row.object_key)
+    if final is None:
+        return None, None
+    problem = _content_problem(final, row)
+    return final, problem
+
+
+def _content_problem(info: ObjectInfo, row: Row) -> str | None:
+    if info.size_bytes > row.size_bytes:
+        return "File is larger than declared"
+    if detect_content_type(info.head) != row.content_type:
+        return "File content does not match the declared type"
+    return None
 
 
 @router.get("/{file_id}/download")
