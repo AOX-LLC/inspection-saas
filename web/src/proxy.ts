@@ -26,7 +26,7 @@ export const config = {
   matcher: [
     {
       // Pages only: the API has its own headers, and static files need no policy.
-      source: "/((?!api|_next/static|_next/image|icon.svg).*)",
+      source: "/((?!api/|api$|_next/static|_next/image|icon.svg).*)",
       missing: [
         { type: "header", key: "next-router-prefetch" },
         { type: "header", key: "purpose", value: "prefetch" },

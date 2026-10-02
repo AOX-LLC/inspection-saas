@@ -58,6 +58,18 @@ describe("install", () => {
     assert.equal(send(new http.Server(), { "x-forwarded-for": "6.6.6.6" }, undefined), undefined);
   });
 
+  it("rewrites the header of an upgrade request too", () => {
+    const http = fakeHttp();
+    install(http);
+    const server = new http.Server();
+    let seen;
+    server.on("upgrade", (incoming) => {
+      seen = incoming.headers["x-forwarded-for"];
+    });
+    server.emit("upgrade", { headers: { "x-forwarded-for": "6.6.6.6" }, socket: { remoteAddress: "172.20.0.1" } }, {}, Buffer.alloc(0));
+    assert.equal(seen, "6.6.6.6, 172.20.0.1");
+  });
+
   it("leaves every other event alone", () => {
     const http = fakeHttp();
     install(http);

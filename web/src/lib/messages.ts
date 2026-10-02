@@ -15,7 +15,7 @@ export function describeLoginFailure(error: unknown): string {
     }
     if (error.status === 503) return "The server is busy. Try again in a few seconds.";
     if (error.status === 0) return unreachable();
-    if (error.status === 403) return "Sign-in was blocked. Reload the page and try again.";
+    if (error.status === 403) return "Sign-in was blocked. Open this app at the address it was set up for (http://127.0.0.1:4700 unless your administrator says otherwise) and try again.";
   }
   return "Something went wrong signing in. Try again.";
 }

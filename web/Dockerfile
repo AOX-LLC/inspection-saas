@@ -31,4 +31,6 @@ COPY --from=build /app/.next/static ./.next/static
 COPY --from=build /app/server/forwarded-for.mjs /app/server/preload.mjs ./server/
 USER 10007:10007
 EXPOSE 3000
-CMD ["node", "server.js"]
+# The preload is part of the command, not only of the compose file: run anywhere, the
+# server still appends the connecting address to X-Forwarded-For.
+CMD ["node", "--import", "./server/preload.mjs", "server.js"]

@@ -23,7 +23,12 @@ const config: NextConfig = {
   async rewrites() {
     // The browser only ever talks to this origin, so the session cookie stays
     // same-origin. The API stays the one authority; this tier adds no logic.
-    return [{ source: "/api/:path*", destination: `${apiOrigin}/:path*` }];
+    // Only the API's real routes. Its interactive docs (/docs, /openapi.json) stay on its
+    // own port: served here they would load third-party script on the origin the API trusts.
+    return ["auth/:path*", "orgs/:path*", "health"].map((path) => ({
+      source: `/api/${path}`,
+      destination: `${apiOrigin}/${path}`,
+    }));
   },
   async headers() {
     return [{ source: "/:path*", headers: staticSecurityHeaders }];

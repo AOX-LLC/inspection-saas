@@ -26,11 +26,12 @@ export function forwardedFor(inbound, peer) {
 }
 
 // Rewrites the header of every request an http.Server receives, before any handler
-// (Next.js's included) sees it.
+// (Next.js's included) sees it. Upgrade requests (websockets) are proxied by Next.js too,
+// so they get the same treatment.
 export function install(http) {
   const emit = http.Server.prototype.emit;
   http.Server.prototype.emit = function patchedEmit(event, request, ...rest) {
-    if (event === "request" && request?.headers) {
+    if ((event === "request" || event === "upgrade") && request?.headers) {
       const value = forwardedFor(request.headers["x-forwarded-for"], request.socket?.remoteAddress);
       if (value === null) delete request.headers["x-forwarded-for"];
       else request.headers["x-forwarded-for"] = value;
