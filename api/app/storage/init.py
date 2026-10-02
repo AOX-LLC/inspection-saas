@@ -24,7 +24,10 @@ KEY_NAME = "inspection-api"
 # One node, one zone. Capacity is a placement weight here, not a quota.
 NODE_ZONE = "local"
 NODE_CAPACITY_BYTES = 10 * 1024**3
-CORS_METHODS = ["GET", "POST", "PUT", "HEAD"]
+# A browser POSTs the file to a presigned URL and shows thumbnails fetched with GET.
+# Nothing else is asked of the store from a page, so nothing else is allowed.
+CORS_METHODS = ["GET", "POST"]
+CORS_HEADERS = ["content-type"]
 CORS_MAX_AGE_SECONDS = 600
 
 
@@ -115,7 +118,7 @@ def _ensure_cors(access_key_id: str, secret_access_key: str) -> None:
                 {
                     "AllowedOrigins": sorted(settings.origins),
                     "AllowedMethods": CORS_METHODS,
-                    "AllowedHeaders": ["*"],
+                    "AllowedHeaders": CORS_HEADERS,
                     "MaxAgeSeconds": CORS_MAX_AGE_SECONDS,
                 }
             ]

@@ -53,8 +53,9 @@ class Settings(BaseSettings):
     # comma-separated. Empty trusts none, and every request is rate-limited by its socket
     # address. In Compose this is the web service, which forwards its clients' addresses.
     trusted_proxies: str = ""
-    # Browser origins allowed to make state-changing requests. Comma-separated.
-    allowed_origins: str = "http://127.0.0.1:4700,http://localhost:4700"
+    # The web app's own origin(s), comma-separated: the only browser origins the API accepts
+    # state-changing requests from, and the only ones the object store's CORS allows.
+    allowed_origins: str = "http://127.0.0.1:4700"
 
     # Object store. Operations use the internal endpoint; presigned URLs are
     # signed for the public one, which is what the browser can reach.
