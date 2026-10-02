@@ -70,13 +70,6 @@ describe("mergePhotos", () => {
     assert.equal(kept?.thumbnail_url, "http://store/a");
   });
 
-  it("takes the new link when asked to renew, because the old ones are about to expire", () => {
-    const before = photo("a", "2026-01-01T00:00:00Z");
-    const resigned = { ...before, thumbnail_url: "http://store/a?signature=new" };
-    const [renewed] = mergePhotos([before], [resigned], true);
-    assert.equal(renewed?.thumbnail_url, "http://store/a?signature=new");
-  });
-
   it("gives a photo that just finished its first link", () => {
     const waiting = { ...photo("a", "2026-01-01T00:00:00Z", "queued") };
     const [done] = mergePhotos([waiting], [photo("a", "2026-01-01T00:00:00Z", "tiled")]);

@@ -11,12 +11,12 @@ function newestFirst(a: Photo, b: Photo): number {
 //
 // A thumbnail link is signed afresh on every fetch, so a new link is a new address to
 // the browser, which would download the same picture again. A photo that already has
-// a link keeps it, until `renewLinks` says the old ones are about to expire.
-export function mergePhotos(shown: Photo[], fresh: Photo[], renewLinks = false): Photo[] {
+// a link keeps it. Links are renewed by replacing the whole list (see use-photos.ts).
+export function mergePhotos(shown: Photo[], fresh: Photo[]): Photo[] {
   const byId = new Map(shown.map((photo) => [photo.id, photo]));
   for (const photo of fresh) {
     const known = byId.get(photo.id)?.thumbnail_url;
-    byId.set(photo.id, !renewLinks && known && photo.thumbnail_url ? { ...photo, thumbnail_url: known } : photo);
+    byId.set(photo.id, known && photo.thumbnail_url ? { ...photo, thumbnail_url: known } : photo);
   }
   return [...byId.values()].sort(newestFirst);
 }

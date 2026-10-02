@@ -30,7 +30,7 @@ export function ProjectView({ orgId, projectId }: { orgId: string; projectId: st
   const [progress, setProgress] = useState<Progress | null>(null);
   const [skipped, setSkipped] = useState(0);
   // Set once the project's queue is empty and one more look at the photos has been taken.
-  const [settledAt, setSettledAt] = useState(0);
+  const [settledBatchSize, setSettledBatchSize] = useState(0);
 
   const photosByFile = useMemo(() => new Map(photos.photos.map((photo) => [photo.file_id, photo])), [photos.photos]);
   const waiting = batch.items.some((item) => {
@@ -38,7 +38,16 @@ export function ProjectView({ orgId, projectId }: { orgId: string; projectId: st
     const photo = item.fileId ? photosByFile.get(item.fileId) : undefined;
     return !photo || isUnfinished(photo);
   });
-  const settled = settledAt === batch.items.length && batch.items.length > 0;
+  // Leaving mid-upload drops what has not been sent yet; the browser asks first.
+  const sending = batch.items.some((item) => ["queued", "uploading", "saving"].includes(item.phase));
+  useEffect(() => {
+    if (!sending) return;
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [sending]);
+
+  const settled = settledBatchSize === batch.items.length && batch.items.length > 0;
   const polling = waiting && !settled;
 
   // While the worker is busy with this upload, ask the API how far it got, and
@@ -64,7 +73,7 @@ export function ProjectView({ orgId, projectId }: { orgId: string; projectId: st
         }
         if (stopped) return;
         if (latest.finished) {
-          setSettledAt(count);
+          setSettledBatchSize(count);
           return;
         }
         delay = POLL_MS;
@@ -89,7 +98,7 @@ export function ProjectView({ orgId, projectId }: { orgId: string; projectId: st
     batch.clear();
     setSkipped(0);
     setProgress(null);
-    setSettledAt(0);
+    setSettledBatchSize(0);
   }
 
   return (

@@ -40,22 +40,29 @@ export function usePhotos(orgId: string, projectId: string): PhotosView {
   const [loadingMore, setLoadingMore] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const lastRenew = useRef(0);
+  // Only the newest answer is applied, so a slow earlier response cannot undo a later one.
+  const latest = useRef(0);
 
   // Fetches the newest page and folds it into what is shown, so photos already on
   // screen are never lost and older pages that were opened stay open.
   const refresh = useCallback(async (renewLinks = false) => {
+    const mine = (latest.current += 1);
     try {
       const page = await api.listPhotos(orgId, projectId, PAGE);
+      if (mine !== latest.current) return;
       setState((previous) => {
-        const same = previous?.key === key;
+        // Renewing links starts again from the newest page: links on older pages cannot be
+        // renewed one page at a time, so they are dropped and fetched again on request.
+        const same = previous?.key === key && !renewLinks;
         return {
           key,
-          photos: same ? mergePhotos(previous.photos, page.items, renewLinks) : page.items,
+          photos: same ? mergePhotos(previous.photos, page.items) : page.items,
           next: same ? previous.next : page.next_cursor,
           failed: null,
         };
       });
     } catch (error) {
+      if (mine !== latest.current) return;
       setState((previous) =>
         previous?.key === key ? { ...previous, failed: error } : { key, photos: [], next: null, failed: error },
       );
